@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import { ML_MODEL, cityStats, computeAlerts as computeSharedAlerts } from '../../shared/anomalyEngine.mjs';
+import { aggregateDiseaseCases, calculateDashboardMetrics, filterReportsByPeriod, recordDate } from '../../shared/reportAnalytics.mjs';
 
 const SECTORS = {
   human: 'Human',
@@ -341,6 +342,22 @@ const dateLabel = (day) =>
     month: 'short',
   });
 
+const reportDate = recordDate;
+const latestReportDate = (rows) => rows.map(reportDate).filter(Boolean).sort((a, b) => b - a)[0] || null;
+const earliestReportDate = (rows) => rows.map(reportDate).filter(Boolean).sort((a, b) => a - b)[0] || null;
+const periodText = (rows, end, days) => {
+  const latest = end || latestReportDate(rows);
+  if (!latest) return 'Selected reporting period';
+  const start = days === 'all' ? earliestReportDate(rows) : new Date(latest.getTime() - (Number(days) - 1) * 864e5);
+  const format = (date) => date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  return days === 'all' ? `Dataset period: ${format(start)} – ${format(latest)}` : `Reporting period: ${format(start)} – ${format(latest)}`;
+};
+const periodizeReports = (rows, end, days) => {
+  const latest = end || latestReportDate(rows) || new Date();
+  return filterReportsByPeriod(rows, latest, days);
+};
+const formatReportDate = (row) => reportDate(row)?.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) || dateLabel(row.day);
+
 const norm = (value) =>
   String(value ?? '')
     .trim()
@@ -390,8 +407,10 @@ function parseCsvRows(text) {
   return rows;
 }
 
-const findColumn = (headers, names) =>
-  headers.findIndex((header) => header && names.some((name) => header === name || header.includes(name) || name.includes(header)));
+const findColumn = (headers, names) => {
+  const exact = headers.findIndex((header) => header && names.includes(header));
+  return exact >= 0 ? exact : headers.findIndex((header) => header && names.some((name) => header.includes(name) || name.includes(header)));
+};
 
 const findColumns = (headers, names) =>
   headers
@@ -432,30 +451,39 @@ function getReportCoords(report) {
 
 const getReportLocations = (reports) => [...new Set(reports.map((row) => row.loc).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 
-function detectSector(row, sectorIndex, diseaseText) {
+function detectSector(row, sectorIndex, diseaseText, sourceDataset = '') {
   const explicit = norm(readCell(row, sectorIndex));
   if (explicit.includes('animal') || explicit.includes('livestock') || explicit.includes('veterinary')) return 'animal';
   if (explicit.includes('environment') || explicit.includes('weather') || explicit.includes('water') || explicit.includes('climate')) return 'environment';
   if (explicit.includes('human') || explicit.includes('patient') || explicit.includes('hospital')) return 'human';
 
-  const joined = norm(`${row.join(' ')} ${diseaseText}`);
+  const joined = norm(diseaseText);
   if (/animal|livestock|cattle|cow|goat|poultry|chicken|avian|veterinary|farm/.test(joined)) return 'animal';
   if (/rain|rainfall|water|temperature|weather|climate|heat|air|pollution|pm2|environment/.test(joined)) return 'environment';
-  return 'human';
+  if (/human|patient|hospital|clinic|people|person|clinical/.test(joined)) return 'human';
+  if (/epiclim|disease.?climate|epidemic|health.?dataset/.test(norm(sourceDataset))) return 'human';
+  return 'unknown';
 }
 
 function parseCases(value) {
   const number = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(number) || number <= 0) return 1;
-  return Math.max(1, Math.min(500, Math.round(number)));
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return Math.max(1, Math.min(1000000000, Math.round(number)));
 }
 
 function parseOptionalCount(value) {
   const raw = String(value ?? '').trim();
-  if (!raw) return 0;
+  if (!raw) return undefined;
   const number = Number(raw.replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(number) || number < 0) return 0;
+  if (!Number.isFinite(number) || number < 0) return undefined;
   return Math.max(0, Math.min(500, Math.round(number)));
+}
+
+function parseMeasurement(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return undefined;
+  const number = Number(raw.replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function parseDateValue(value) {
@@ -496,9 +524,11 @@ const CSV_HEADERS = {
     'metric',
     'variable',
   ],
-  sector: ['sector', 'source', 'type', 'category', 'domain', 'report_type'],
-  cases: ['cases', 'case_count', 'count', 'total', 'value', 'number', 'num_cases', 'confirmed', 'incidence', 'deaths', 'patients'],
-  date: ['date', 'report_date', 'onset_date', 'created_at', 'updated_at', 'observation_date', 'year', 'month'],
+  sector: ['sector', 'type', 'category', 'report_type'],
+  cases: ['cases', 'case_count', 'count', 'total', 'value', 'number', 'num_cases', 'confirmed', 'incidence', 'patients'],
+  date: ['date', 'report_date', 'onset_date', 'created_at', 'updated_at', 'observation_date'],
+  year: ['year'],
+  weekNumber: ['week_number', 'week', 'epi_week'],
   lat: ['lat', 'latitude'],
   lon: ['lon', 'lng', 'long', 'longitude'],
   species: ['species', 'animal_species', 'livestock_species', 'animal_type'],
@@ -508,6 +538,11 @@ const CSV_HEADERS = {
   confirmationStatus: ['confirmation_status', 'lab_status', 'test_status', 'confirmed_status', 'case_status'],
   farmId: ['farm_id', 'farm', 'premise_id', 'holding_id', 'owner_id'],
   block: ['block', 'tehsil', 'taluka', 'village', 'panchayat'],
+  temperature: ['temperature_celsius_derived', 'temperature_celsius', 'temperature', 'temp'],
+  precipitation: ['precipitation_mm_source', 'precipitation_mm', 'precipitation', 'rainfall'],
+  sourceDataset: ['source_dataset'],
+  sourceUrl: ['source_url', 'url'],
+  synthetic: ['is_synthetic', 'synthetic'],
 };
 
 function validateCsvHeaders({ locationColumns, diseaseIndex, sectorIndex, caseIndex, latIndex, lonIndex }) {
@@ -527,10 +562,16 @@ function parseUploadedCsv(text) {
   const headers = rows[0].map(norm);
   const body = rows.slice(1);
   const locationColumns = findColumns(headers, CSV_HEADERS.location);
+  const locationIndex = findColumn(headers, ['location']);
+  const cityIndex = findColumn(headers, ['city']);
+  const stateIndex = findColumn(headers, ['state']);
+  const districtIndex = findColumn(headers, ['district']);
   const diseaseIndex = findColumn(headers, CSV_HEADERS.signal);
   const sectorIndex = findColumn(headers, CSV_HEADERS.sector);
   const caseIndex = findColumn(headers, CSV_HEADERS.cases);
   const dateIndex = findColumn(headers, CSV_HEADERS.date);
+  const yearIndex = findColumn(headers, CSV_HEADERS.year);
+  const weekNumberIndex = findColumn(headers, CSV_HEADERS.weekNumber);
   const latIndex = findColumn(headers, CSV_HEADERS.lat);
   const lonIndex = findColumn(headers, CSV_HEADERS.lon);
   const speciesIndex = findColumn(headers, CSV_HEADERS.species);
@@ -540,10 +581,15 @@ function parseUploadedCsv(text) {
   const confirmationIndex = findColumn(headers, CSV_HEADERS.confirmationStatus);
   const farmIndex = findColumn(headers, CSV_HEADERS.farmId);
   const blockIndex = findColumn(headers, CSV_HEADERS.block);
+  const temperatureIndex = findColumn(headers, CSV_HEADERS.temperature);
+  const precipitationIndex = findColumn(headers, CSV_HEADERS.precipitation);
+  const sourceDatasetIndex = findColumn(headers, CSV_HEADERS.sourceDataset);
+  const sourceUrlIndex = findColumn(headers, CSV_HEADERS.sourceUrl);
+  const syntheticIndex = findColumn(headers, CSV_HEADERS.synthetic);
   const headerError = validateCsvHeaders({ locationColumns, diseaseIndex, sectorIndex, caseIndex, latIndex, lonIndex });
   if (headerError) return { reports: [], skipped: body.length, error: headerError };
 
-  const datedRows = body.map((row) => ({ row, date: parseDateValue(readCell(row, dateIndex)) }));
+  const datedRows = body.map((row) => ({ row, date: parseDateValue(readCell(row, dateIndex)) || parseDateValue(readCell(row, yearIndex)) }));
   const maxDate =
     datedRows
       .map((item) => item.date)
@@ -561,7 +607,7 @@ function parseUploadedCsv(text) {
 
     const lat = toCoordNumber(readCell(row, latIndex));
     const lon = toCoordNumber(readCell(row, lonIndex));
-    const location = detectLocationName(row, locationColumns) || (lat !== null && lon !== null ? `Point ${index + 1}` : null);
+    const location = readCell(row, locationIndex) || readCell(row, cityIndex) || readCell(row, districtIndex) || readCell(row, stateIndex) || (lat !== null && lon !== null ? `Point ${index + 1}` : null);
     const knownCoords = getKnownCoords(location);
     const coords = lat !== null && lon !== null && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 ? [lat, lon] : knownCoords;
     if (!location || !coords) {
@@ -569,17 +615,15 @@ function parseUploadedCsv(text) {
       return;
     }
     const disease = readCell(row, diseaseIndex) || 'Imported CSV signal';
-    const sector = detectSector(row, sectorIndex, disease);
+    const sourceDataset = readCell(row, sourceDatasetIndex);
+    const sector = detectSector(row, sectorIndex, disease, sourceDataset);
     const cases = parseCases(readCell(row, caseIndex));
     const mortality = parseOptionalCount(readCell(row, mortalityIndex));
     const latestDay = maxDate ? new Date(maxDate).setHours(0, 0, 0, 0) : null;
     const rowDay = date ? new Date(date).setHours(0, 0, 0, 0) : null;
     const day = rowDay && latestDay ? Math.max(0, Math.round((latestDay - rowDay) / 864e5)) : index % 30;
 
-    if (day > 29) {
-      skipped += 1;
-      return;
-    }
+    if (!cases || !date) { skipped += 1; return; }
     reports.push(decorateUiReport({
       id: index + 1,
       day,
@@ -589,9 +633,19 @@ function parseUploadedCsv(text) {
       sec: sector,
       dis: disease.slice(0, 60),
       n: cases,
+      date: date.toISOString(),
+      state: cleanOptional(readCell(row, stateIndex)) || undefined,
+      district: cleanOptional(readCell(row, districtIndex)) || undefined,
+      weekNumber: cleanOptional(readCell(row, weekNumberIndex)) || undefined,
       species: cleanOptional(readCell(row, speciesIndex)) || undefined,
       symptoms: cleanOptional(readCell(row, symptomsIndex)) || undefined,
       mortality,
+      deaths: mortality,
+      temperatureCelsius: parseMeasurement(readCell(row, temperatureIndex)),
+      precipitationMm: parseMeasurement(readCell(row, precipitationIndex)),
+      sourceDataset: cleanOptional(sourceDataset) || undefined,
+      sourceUrl: cleanOptional(readCell(row, sourceUrlIndex)) || undefined,
+      isSynthetic: /^(true|1|yes)$/i.test(readCell(row, syntheticIndex)),
       vaccinationStatus: normEnum(readCell(row, vaccinationIndex), Object.keys(VACCINATION_OPTIONS), 'unknown'),
       confirmationStatus: normEnum(readCell(row, confirmationIndex), Object.keys(CONFIRMATION_OPTIONS), 'suspected'),
       farmId: cleanOptional(readCell(row, farmIndex)) || undefined,
@@ -645,15 +699,36 @@ function CsvUploadButton({ onUpload }) {
   );
 }
 
+function DatasetSelector({ datasets, activeDatasetId, onChange }) {
+  if (!datasets.length) return null;
+  const active = datasets.find((dataset) => dataset.datasetId === activeDatasetId);
+  return (
+    <label className="grid min-w-[250px] gap-1 text-xs text-mute">
+      Active dataset
+      <select className="rounded border border-line bg-card px-2.5 py-2 text-sm text-ink" value={activeDatasetId || ''} onChange={(event) => onChange(event.target.value)}>
+        {datasets.map((dataset) => (
+          <option key={dataset.datasetId} value={dataset.datasetId} disabled={dataset.status === 'failed'}>
+            {dataset.fileName} · {(dataset.importedRows ?? dataset.rowCount ?? 0).toLocaleString('en-IN')} rows
+          </option>
+        ))}
+      </select>
+      {active ? <span>{active.dateMin ? `${new Date(active.dateMin).toLocaleDateString('en-IN')} – ${new Date(active.dateMax).toLocaleDateString('en-IN')}` : 'Date range unavailable'} · {active.status}</span> : null}
+    </label>
+  );
+}
+
 function LoginPage({ onLogin, onSignup, error, loading }) {
   const [mode, setMode] = useState('login');
   const [form, setForm] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
+  const submitInFlight = useRef(false);
   const [notice, setNotice] = useState('');
 
   const submit = async (event) => {
     event.preventDefault();
+    if (submitInFlight.current) return;
+    submitInFlight.current = true;
     setNotice('');
     setBusy(true);
     try {
@@ -665,6 +740,7 @@ function LoginPage({ onLogin, onSignup, error, loading }) {
       }
     } finally {
       setBusy(false);
+      submitInFlight.current = false;
     }
   };
 
@@ -968,9 +1044,7 @@ function LeafletDiseaseMap({ reports, alerts, layers, mapFilters, selectedLocati
           const coords = sample ? getReportCoords(sample) : getKnownCoords(loc);
           if (!coords) return null;
           const alert = alertByCity[loc];
-          const count = total(
-            reports.filter((row) => row.loc === loc && row.day < 7 && (mapFilters.sector === 'all' || row.sec === mapFilters.sector)),
-          );
+          const count = reports.filter((row) => row.loc === loc && (mapFilters.sector === 'all' || row.sec === mapFilters.sector)).length;
           if (count < mapFilters.minCases) return null;
           if (mapFilters.severity === 'alerts' && !alert) return null;
           if (mapFilters.severity === 'high' && alert?.severity !== 'high') return null;
@@ -1060,7 +1134,7 @@ function LeafletDiseaseMap({ reports, alerts, layers, mapFilters, selectedLocati
         fillColor: color,
         fillOpacity: alerted ? 0.9 : 0.76,
       })
-        .bindTooltip(`${loc}: ${count.toLocaleString('en-IN')} reports this week${alerted ? ', unusual rise' : ''}`)
+        .bindTooltip(`${loc}: ${count.toLocaleString('en-IN')} reports in selected period${alerted ? ', unusual rise' : ''}`)
         .on('click', () => setSelectedLocation(loc))
         .addTo(layer);
     });
@@ -1076,10 +1150,13 @@ function LeafletDiseaseMap({ reports, alerts, layers, mapFilters, selectedLocati
 
 function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilters, selectedLocation, setSelectedLocation }) {
   const alertByCity = Object.fromEntries(alerts.map((alert) => [alert.loc, alert]));
-  const weekForCity = (loc) => reports.filter((row) => row.loc === loc && row.day < 7 && (mapFilters.sector === 'all' || row.sec === mapFilters.sector));
+  const weekForCity = (loc) => reports.filter((row) => row.loc === loc && (mapFilters.sector === 'all' || row.sec === mapFilters.sector));
   const selectedWeek = selectedLocation ? weekForCity(selectedLocation) : [];
   const selectedAlert = selectedLocation ? alertByCity[selectedLocation] : null;
-  const selectedEnv = selectedLocation ? (ENV[selectedLocation] ?? [0, 0]) : [0, 0];
+  const selectedSample = selectedLocation ? reports.find((row) => row.loc === selectedLocation) : null;
+  const selectedEnv = selectedLocation
+    ? [selectedSample?.temperatureCelsius ?? ENV[selectedLocation]?.[0] ?? 0, selectedSample?.precipitationMm ?? ENV[selectedLocation]?.[1] ?? 0]
+    : [0, 0];
   const mappedLocations = getReportLocations(reports).filter((loc) => {
     const weeklyCount = total(weekForCity(loc));
     const alert = alertByCity[loc];
@@ -1094,7 +1171,7 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
   return (
     <div className="map-shell flex min-h-full flex-col rounded-[24px] p-4 text-[#dbe6f2] sm:p-6">
       <h2 className="font-display text-[22px] font-bold text-white">Live disease map</h2>
-      <div className="mb-2 text-sm text-[#8fa4bd]">Dark map with dynamic CSV locations. Bubble size is this week's reports.</div>
+      <div className="mb-2 text-sm text-[#8fa4bd]">Dark map with dynamic CSV locations. Bubble size follows the selected reporting period.</div>
       <div className="mb-2 flex flex-wrap gap-2">
         {[
           ['heat', 'Heatmap'],
@@ -1162,16 +1239,16 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
           setSelectedLocation={setSelectedLocation}
         />
         <div className="border-l-2 border-[#2b4161] pl-3 text-[13px] text-[#b8c8da]">
-          {selectedLocation ? (
+            {selectedLocation ? (
             <>
               <b className="block font-display text-[22px] font-bold text-white">{selectedLocation}</b>
-              {total(selectedWeek)} reports this week
+              {total(selectedWeek)} reports in the selected period
               <br />
-              Human {total(selectedWeek.filter((row) => row.sec === 'human'))}
+              Human cases {total(selectedWeek.filter((row) => row.sec === 'human'))}
               <br />
-              Animal {total(selectedWeek.filter((row) => row.sec === 'animal'))}
+              Animal reports {selectedWeek.filter((row) => row.sec === 'animal').length}
               <br />
-              Environment {total(selectedWeek.filter((row) => row.sec === 'environment'))}
+              Climate observations {selectedWeek.filter((row) => Number.isFinite(Number(row.temperatureCelsius)) || Number.isFinite(Number(row.precipitationMm))).length}
               <br />
               Temp {sign(selectedEnv[0])} deg C, rain {sign(selectedEnv[1])}%
               {selectedAlert ? (
@@ -1186,7 +1263,7 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
           ) : (
             <>
               <b className="block font-display text-[22px] font-bold text-white">Pick a city</b>
-              Click a bubble to see this week's reports by sector. {mappedLocations.length.toLocaleString('en-IN')} locations match the map filters.
+              Click a bubble to see reports by sector. {mappedLocations.length.toLocaleString('en-IN')} locations match the map filters.
             </>
           )}
         </div>
@@ -1212,16 +1289,27 @@ function LineChart({ reports }) {
   const width = 640;
   const height = 230;
   const pad = 30;
-  const days = [...Array(30).keys()].reverse();
+  const dated = reports.map((row) => ({
+    row,
+    date: reportDate(row) || new Date(Date.now() - (Number(row.day) || 0) * 864e5),
+  })).filter(({ date }) => !Number.isNaN(date.getTime()));
+  const minTime = dated.length ? Math.min(...dated.map(({ date }) => date.getTime())) : Date.now();
+  const maxTime = dated.length ? Math.max(...dated.map(({ date }) => date.getTime())) : minTime;
+  const spanDays = Math.max(0, Math.round((maxTime - minTime) / 864e5));
+  const bucketCount = Math.min(30, Math.max(1, spanDays + 1));
+  const bucketIndex = (date) => bucketCount === 1 ? 0 : Math.min(bucketCount - 1, Math.floor(((date.getTime() - minTime) / Math.max(1, maxTime - minTime)) * bucketCount));
   const sectorSeries = Object.keys(SECTORS).map((sector) =>
-    days.map((day) => total(reports.filter((row) => row.sec === sector && row.day === day))),
+    Array.from({ length: bucketCount }, (_, bucket) => dated
+      .filter(({ row, date }) => row.sec === sector && bucketIndex(date) === bucket)
+      .reduce((sum, { row }) => sum + (Number(row.n) || 0), 0)),
   );
   const max = Math.max(...sectorSeries.flat(), 4);
-  const x = (index) => pad + (index * (width - pad - 8)) / 29;
+  const x = (index) => pad + (index * (width - pad - 8)) / Math.max(1, bucketCount - 1);
   const y = (value) => height - 24 - (value * (height - 44)) / max;
+  const labelIndexes = [...new Set([0, Math.floor((bucketCount - 1) / 4), Math.floor((bucketCount - 1) / 2), Math.floor((bucketCount - 1) * 3 / 4), bucketCount - 1])];
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Daily reports by sector, last 30 days">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Cases by sector across the selected reporting period">
       {[0, 1, 2, 3, 4].map((i) => {
         const value = Math.round((max * i) / 4);
         return (
@@ -1233,9 +1321,9 @@ function LineChart({ reports }) {
           </g>
         );
       })}
-      {[0, 7, 14, 21, 29].map((index) => (
+      {labelIndexes.map((index) => (
         <text key={index} x={x(index)} y={height - 6} textAnchor="middle">
-          {dateLabel(days[index])}
+          {new Date(minTime + ((maxTime - minTime) * index) / Math.max(1, bucketCount - 1)).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: spanDays > 365 ? 'numeric' : undefined })}
         </text>
       ))}
       {Object.keys(SECTORS).map((sector, index) => (
@@ -1254,13 +1342,7 @@ function LineChart({ reports }) {
 
 function LeadingSignals({ reports }) {
   const entries = useMemo(() => {
-    const count = {};
-    for (const row of reports.filter((item) => item.day < 30)) {
-      if (!count[row.dis]) count[row.dis] = { cases: 0, sectors: {} };
-      count[row.dis].cases += row.n;
-      count[row.dis].sectors[row.sec] = (count[row.dis].sectors[row.sec] || 0) + row.n;
-    }
-    return Object.entries(count)
+    return Object.entries(aggregateDiseaseCases(reports))
       .map(([disease, item]) => {
         const sector = Object.entries(item.sectors).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'human';
         return [disease, item.cases, sector];
@@ -1303,20 +1385,34 @@ function Dashboard({
   empty,
   uploadInfo,
   onCsvUpload,
+  periodDays,
+  setPeriodDays,
+  periodLabel,
+  periodEmpty,
+  alertsUnavailable,
+  datasets,
+  activeDatasetId,
+  onDatasetChange,
 }) {
-  const week = (sector) => reports.filter((row) => row.day < 7 && (!sector || row.sec === sector));
+  const week = (sector) => reports.filter((row) => !sector || row.sec === sector);
   const locationCount = getReportLocations(reports).length;
+  const metrics = calculateDashboardMetrics(reports);
+  const metric = (sector) => {
+    if (sector === 'human') return metrics.humanCases;
+    if (sector === 'animal') return metrics.animalReports ?? '—';
+    return metrics.climateObservations;
+  };
   const trend = (sector) => {
-    const current = total(reports.filter((row) => row.sec === sector && row.day < 7));
-    const previous = total(reports.filter((row) => row.sec === sector && row.day >= 7 && row.day < 14));
-    return `${current >= previous ? 'Up' : 'Down'} ${Math.abs(current - previous)} from last week`;
+    const value = metric(sector);
+    return `${typeof value === 'number' ? value.toLocaleString('en-IN') : value} in selected period`;
   };
   const count = alerts.length;
   const animalWeek = week('animal');
-  const livestockDeaths = animalWeek.reduce((sum, row) => sum + (Number(row.mortality) || 0), 0);
-  const unvaccinatedHerds = animalWeek.filter((row) => row.vaccinationStatus === 'unvaccinated').length;
-  const labConfirmedAnimal = animalWeek.filter((row) => row.confirmationStatus === 'lab_confirmed').length;
-  const speciesCount = new Set(animalWeek.map((row) => row.species).filter(Boolean)).size;
+  const hasAnimalData = animalWeek.length > 0;
+  const livestockDeaths = hasAnimalData ? animalWeek.reduce((sum, row) => sum + (Number(row.mortality) || 0), 0) : '—';
+  const unvaccinatedHerds = hasAnimalData ? animalWeek.filter((row) => row.vaccinationStatus === 'unvaccinated').length : '—';
+  const labConfirmedAnimal = hasAnimalData ? animalWeek.filter((row) => row.confirmationStatus === 'lab_confirmed').length : '—';
+  const speciesCount = hasAnimalData ? new Set(animalWeek.map((row) => row.species).filter(Boolean)).size : '—';
 
   return (
     <>
@@ -1329,7 +1425,7 @@ function Dashboard({
           </div>
         }
       >
-        Human, animal and environmental reports from {locationCount.toLocaleString('en-IN')} mapped locations, week ending {dateLabel(0)}.
+        Records from {locationCount.toLocaleString('en-IN')} mapped locations. {periodLabel}.
       </Top>
 
       {uploadInfo ? (
@@ -1339,6 +1435,19 @@ function Dashboard({
           {uploadInfo.skipped ? <span className="text-mute"> {uploadInfo.skipped.toLocaleString('en-IN')} older or blank rows were ignored.</span> : null}
         </div>
       ) : null}
+
+      <div className="mb-5 flex flex-wrap items-center gap-3 rounded-tool border border-line bg-card p-3 text-sm text-mute">
+        <DatasetSelector datasets={datasets} activeDatasetId={activeDatasetId} onChange={onDatasetChange} />
+        <label className="font-semibold text-ink" htmlFor="report-period">Reporting period</label>
+        <select id="report-period" className="rounded border border-line bg-card px-2 py-1 text-ink" value={periodDays} onChange={(event) => setPeriodDays(event.target.value === 'all' ? 'all' : Number(event.target.value))}>
+          <option value={7}>Last 7 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+          <option value="all">All dataset records</option>
+        </select>
+        <span>{periodLabel}</span>
+      </div>
+      {periodEmpty ? <div className="mb-5 rounded-tool border border-animal/40 bg-card p-4 text-sm text-ink">No records fall in this reporting period. Choose another period or select “All dataset records”.</div> : null}
 
       <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] xl:gap-11">
         <MapPanel
@@ -1354,7 +1463,7 @@ function Dashboard({
         <section>
           <h2 className="font-display text-2xl font-bold">Early warnings</h2>
           <div className="mb-2 text-sm text-mute">The number is a risk score out of 100. It combines how far reports rose, weather and movement routes.</div>
-          {alerts.length ? alerts.slice(0, 4).map((alert) => <AlertItem key={alert.loc} alert={alert} compact />) : <div className="py-5 text-mute">No unusual increases this week.</div>}
+          {alerts.length ? alerts.slice(0, 4).map((alert) => <AlertItem key={alert.loc} alert={alert} compact />) : <div className="py-5 text-mute">{alertsUnavailable ? 'Alerts are not calculated from uploaded historical records.' : 'No unusual increases in this period.'}</div>}
           <Button variant="ghost" className="mt-3" onClick={() => setPage('alerts')}>
             See all alerts
           </Button>
@@ -1362,9 +1471,9 @@ function Dashboard({
       </div>
 
       <div className="my-9 grid border-t-2 border-ink md:grid-cols-4">
-        <StatCard label="Human cases" value={total(week('human'))} color={COLORS.human} note={trend('human')} />
-        <StatCard label="Animal reports" value={total(week('animal'))} color={COLORS.animal} note={trend('animal')} />
-        <StatCard label="Environment signals" value={total(week('environment'))} color={COLORS.environment} note={trend('environment')} />
+        <StatCard label="Human cases" value={metric('human')} color={COLORS.human} note={trend('human')} />
+        <StatCard label="Animal reports" value={metric('animal')} color={COLORS.animal} note={trend('animal')} />
+        <StatCard label="Climate observations" value={metric('environment')} color={COLORS.environment} note="Rows with temperature or precipitation data" />
         <StatCard label="Active alerts" value={count} color={COLORS.alert} note="Unusual rise detected" />
       </div>
 
@@ -1387,7 +1496,7 @@ function Dashboard({
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] xl:gap-11">
         <section>
           <h2 className="font-display text-[22px] font-bold">Reports over time</h2>
-          <div className="mb-2 text-sm text-mute">Daily totals for the last 30 days</div>
+          <div className="mb-2 text-sm text-mute">Daily totals for the selected reporting period</div>
           <div className="mb-2 flex flex-wrap gap-3 text-[13px] text-mute">
             {Object.keys(SECTORS).map((sector) => (
               <span key={sector} className="inline-flex items-center gap-1.5">
@@ -1400,7 +1509,7 @@ function Dashboard({
         </section>
         <section>
           <h2 className="font-display text-[22px] font-bold">Leading signals</h2>
-          <div className="mb-2 text-sm text-mute">Most reported diseases, last 30 days</div>
+          <div className="mb-2 text-sm text-mute">Most reported diseases in the selected period</div>
           <LeadingSignals reports={reports} />
         </section>
       </div>
@@ -1419,7 +1528,7 @@ function Dashboard({
 
 function ReportsPage({ reports, setReports, filters, setFilters, live, reload, showToast, auth }) {
   const locationOptions = useMemo(
-    () => [...new Set([...getReportLocations(reports), ...LOCATIONS.map(([loc]) => loc)])].sort((a, b) => a.localeCompare(b)),
+    () => [...new Set([...getReportLocations(reports), ...reports.map((row) => row.district).filter(Boolean), ...LOCATIONS.map(([loc]) => loc)])].sort((a, b) => a.localeCompare(b)),
     [reports],
   );
   const [form, setForm] = useState({
@@ -1437,7 +1546,7 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
   });
 
   const rows = reports
-    .filter((row) => (filters.sec === 'all' || row.sec === filters.sec) && (filters.loc === 'all' || row.loc === filters.loc))
+    .filter((row) => (filters.sec === 'all' || row.sec === filters.sec) && (filters.loc === 'all' || row.loc === filters.loc || row.district === filters.loc))
     .sort((a, b) => a.day - b.day || b.id - a.id)
     .slice(0, 40);
   const canWrite = !live || can(auth, 'reports:write');
@@ -1631,7 +1740,7 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
             {rows.length ? (
               rows.map((row) => (
                 <tr key={`${row.id}-${row.loc}-${row.day}`} className="hover:bg-mute/10">
-                  <td className="border-b border-line p-2.5">{dateLabel(row.day)}</td>
+                  <td className="border-b border-line p-2.5">{formatReportDate(row)}</td>
                   <td className="border-b border-line p-2.5">
                     <Tag sector={row.sec} />
                   </td>
@@ -1932,6 +2041,8 @@ function AdminPage({ auth, showToast }) {
   const [users, setUsers] = useState([]);
   const [audit, setAudit] = useState([]);
   const [quality, setQuality] = useState(null);
+  const [showAllAudit, setShowAllAudit] = useState(false);
+  const [showAllQuality, setShowAllQuality] = useState(false);
   const [form, setForm] = useState({ username: '', password: '', role: 'viewer' });
   const [busy, setBusy] = useState(false);
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${auth?.token}` };
@@ -2001,6 +2112,12 @@ function AdminPage({ auth, showToast }) {
 
   const flagRows = Object.entries(quality?.flagCounts || {}).map(([flag, count]) => [QUALITY_LABELS[flag] || flag, count]);
   const sourceRows = Object.entries(quality?.bySource || {}).map(([source, count]) => [SOURCE_LABELS[source] || source, count]);
+  const auditRows = audit.length ? audit : [{ at: null, actor: '-', role: '-', action: 'No audit records', details: {} }];
+  const qualityRows = quality?.samples?.length
+    ? quality.samples
+    : [{ disease: 'No review items', location: '-', sourceType: '-', dataQualityScore: 0, qualityFlags: [] }];
+  const visibleAuditRows = showAllAudit ? auditRows : auditRows.slice(0, 5);
+  const visibleQualityRows = showAllQuality ? qualityRows : qualityRows.slice(0, 5);
 
   return (
     <>
@@ -2057,7 +2174,7 @@ function AdminPage({ auth, showToast }) {
           <div className="mb-2 text-sm text-mute">Recent privileged actions written by the backend</div>
           <DataTable
             headers={['Time', 'Actor', 'Role', 'Action', 'Details']}
-            rows={(audit.length ? audit : [{ at: null, actor: '-', role: '-', action: 'No audit records', details: {} }]).map((log) => [
+            rows={visibleAuditRows.map((log) => [
               log.at ? new Date(log.at).toLocaleString('en-IN') : '-',
               log.actor,
               log.role,
@@ -2065,6 +2182,11 @@ function AdminPage({ auth, showToast }) {
               Object.entries(log.details || {}).map(([key, value]) => `${key}: ${value}`).join(', ') || '-',
             ])}
           />
+          {auditRows.length > 5 && (
+            <Button variant="ghost" className="mt-3 px-3 py-1.5" onClick={() => setShowAllAudit((current) => !current)}>
+              {showAllAudit ? 'Show less' : 'Show more'}
+            </Button>
+          )}
         </section>
 
         <section>
@@ -2093,7 +2215,7 @@ function AdminPage({ auth, showToast }) {
           <div className="mb-2 text-sm text-mute">Lowest-confidence records with missing context</div>
           <DataTable
             headers={['Signal', 'Location', 'Source', 'Quality', 'Flags']}
-            rows={(quality?.samples?.length ? quality.samples : [{ disease: 'No review items', location: '-', sourceType: '-', dataQualityScore: 0, qualityFlags: [] }]).map((sample) => [
+            rows={visibleQualityRows.map((sample) => [
               sample.disease,
               sample.location,
               SOURCE_LABELS[sample.sourceType] || sample.sourceType,
@@ -2101,6 +2223,11 @@ function AdminPage({ auth, showToast }) {
               (sample.qualityFlags || []).map((flag) => QUALITY_LABELS[flag] || flag).join(', ') || '-',
             ])}
           />
+          {qualityRows.length > 5 && (
+            <Button variant="ghost" className="mt-3 px-3 py-1.5" onClick={() => setShowAllQuality((current) => !current)}>
+              {showAllQuality ? 'Show less' : 'Show more'}
+            </Button>
+          )}
         </section>
       </div>
     </>
@@ -2148,6 +2275,10 @@ function App() {
   const [activeCity, setActiveCity] = useState(null);
   const [toast, setToast] = useState('');
   const [uploadInfo, setUploadInfo] = useState(null);
+  const [datasets, setDatasets] = useState([]);
+  const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem('onehealth-dataset-id') || '');
+  const [periodDays, setPeriodDays] = useState(7);
+  const [periodEnd, setPeriodEnd] = useState(null);
   const [weatherByCity, setWeatherByCity] = useState(ENV);
   const [weatherSource, setWeatherSource] = useState('demo');
   const [auth, setAuth] = useState(null);
@@ -2155,7 +2286,11 @@ function App() {
   const [authError, setAuthError] = useState('');
   const [manualValidations, setManualValidations] = useState({});
   const csvUploadToken = useRef(0);
-  const rawAlerts = useMemo(() => computeAlerts(reports, weatherByCity), [reports, weatherByCity]);
+  const datasetReports = reports;
+  const analysisReports = useMemo(() => periodizeReports(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
+  const periodLabel = useMemo(() => periodText(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
+  const uploadedDataset = datasetReports.some((row) => row.sourceType === 'csv' || row.sourceType === 'csv_browser');
+  const rawAlerts = useMemo(() => uploadedDataset ? [] : computeAlerts(analysisReports, weatherByCity), [analysisReports, uploadedDataset, weatherByCity]);
   const alerts = useMemo(
     () =>
       rawAlerts.map((alert) => {
@@ -2340,14 +2475,36 @@ function App() {
     showToast(`Response set to ${RESPONSE_STATUSES[responseStatus] || responseStatus} in demo mode`);
   };
 
-  const loadReports = async (first = false) => {
+  const loadDatasets = async (preferredId = '') => {
+    try {
+      const response = await fetch('/api/reports/datasets', { headers: { Authorization: `Bearer ${auth?.token}` } });
+      if (!response.ok) throw new Error('dataset list failed');
+      const nextDatasets = await response.json();
+      setDatasets(nextDatasets);
+      const savedId = preferredId || window.localStorage.getItem('onehealth-dataset-id') || '';
+      const selectable = nextDatasets.filter((dataset) => dataset.status === 'ready' || dataset.status === 'legacy');
+      const selected = selectable.find((dataset) => dataset.datasetId === savedId) || selectable[0];
+      const nextId = selected?.datasetId || '';
+      setActiveDatasetId(nextId);
+      if (nextId) window.localStorage.setItem('onehealth-dataset-id', nextId);
+      return nextId;
+    } catch {
+      setDatasets([]);
+      setActiveDatasetId('');
+      return '';
+    }
+  };
+
+  const loadReports = async (first = false, datasetId = activeDatasetId) => {
     if (first) setReports(DEMO_REPORTS);
     const tokenAtStart = csvUploadToken.current;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 4000);
 
     try {
-      const response = await fetch('/api/reports?limit=500', { signal: controller.signal, headers: { Authorization: `Bearer ${auth?.token}` } });
+      const query = new URLSearchParams({ limit: '50000' });
+      if (datasetId) query.set('datasetId', datasetId);
+      const response = await fetch(`/api/reports?${query.toString()}`, { signal: controller.signal, headers: { Authorization: `Bearer ${auth?.token}` } });
       if (response.status === 401) {
         logout();
         return;
@@ -2357,7 +2514,6 @@ function App() {
       if (tokenAtStart !== csvUploadToken.current) return;
       setLive(true);
       setEmpty(!rows.length);
-      setUploadInfo(null);
 
       if (rows.length) {
         const today = new Date().setHours(0, 0, 0, 0);
@@ -2365,6 +2521,7 @@ function App() {
             const coords = getKnownCoords(row.location);
             return decorateUiReport({
               id: rows.length - index,
+              date: row.date,
               day: Math.max(0, Math.round((today - new Date(row.date).setHours(0, 0, 0, 0)) / 864e5)),
               loc: row.location,
               lat: Number.isFinite(row.latitude) ? row.latitude : coords?.[0],
@@ -2375,6 +2532,15 @@ function App() {
               species: row.species,
               symptoms: row.symptoms,
               mortality: row.mortality,
+              deaths: row.deaths,
+              state: row.state,
+              district: row.district,
+              weekNumber: row.weekNumber,
+              temperatureCelsius: row.temperatureCelsius,
+              precipitationMm: row.precipitationMm,
+              sourceDataset: row.sourceDataset,
+              sourceUrl: row.sourceUrl,
+              isSynthetic: row.isSynthetic,
               vaccinationStatus: row.vaccinationStatus,
               confirmationStatus: row.confirmationStatus,
               farmId: row.farmId,
@@ -2382,11 +2548,16 @@ function App() {
               sourceType: row.sourceType,
               sourceName: row.sourceName,
               sourceUploadedBy: row.sourceUploadedBy,
+              sourceUploadedAt: row.sourceUploadedAt,
               dataQualityScore: row.dataQualityScore,
               qualityFlags: row.qualityFlags,
             });
           });
         setReports(nextReports);
+        const selectedDataset = datasets.find((dataset) => dataset.datasetId === datasetId);
+        setUploadInfo(datasetId && selectedDataset ? { name: selectedDataset.fileName, rows: selectedDataset.importedRows ?? selectedDataset.rowCount, skipped: selectedDataset.skippedRows ?? 0, saved: true, datasetId } : null);
+        setPeriodEnd(latestReportDate(nextReports));
+        if (datasetId) setPeriodDays('all');
         loadServerAlertContext(tokenAtStart);
         loadWeatherContext(nextReports, tokenAtStart);
       } else {
@@ -2398,6 +2569,14 @@ function App() {
     } finally {
       window.clearTimeout(timeout);
     }
+  };
+
+  const changeDataset = (datasetId) => {
+    setActiveDatasetId(datasetId);
+    window.localStorage.setItem('onehealth-dataset-id', datasetId);
+    setSelectedLocation(null);
+    setActiveCity(null);
+    setManualValidations({});
   };
 
   const handleCsvUpload = async (event) => {
@@ -2418,6 +2597,20 @@ function App() {
       }
 
       try {
+        const previewData = new FormData();
+        previewData.append('file', file);
+        const previewResponse = await fetch('/api/reports/import-csv/preview', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${auth.token}` },
+          body: previewData,
+        });
+        const preview = await previewResponse.json().catch(() => ({}));
+        if (!previewResponse.ok) throw new Error(preview.error || 'CSV validation failed');
+        const range = preview.dateRange?.min && preview.dateRange?.max
+          ? ` ${new Date(preview.dateRange.min).toLocaleDateString('en-IN')} – ${new Date(preview.dateRange.max).toLocaleDateString('en-IN')}.`
+          : '';
+        if (!window.confirm(`Import ${preview.fileName}?\n${preview.importedRows.toLocaleString('en-IN')} rows will be imported, ${preview.skippedRows} skipped.${range}`)) return;
+
         const formData = new FormData();
         formData.append('file', file);
         const response = await fetch('/api/reports/import-csv', {
@@ -2428,8 +2621,11 @@ function App() {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || 'CSV import failed');
 
-        await loadReports(false);
-        setUploadInfo({ name: file.name, rows: payload.inserted, skipped: payload.skipped, saved: true });
+        await loadDatasets(payload.datasetId);
+        if (payload.datasetId) await loadReports(false, payload.datasetId);
+        if (payload.dateRange?.max) setPeriodEnd(new Date(payload.dateRange.max));
+        setPeriodDays('all');
+        setUploadInfo({ name: file.name, rows: payload.inserted, skipped: payload.skipped, saved: true, datasetId: payload.datasetId });
         setSelectedLocation(null);
         setPage('dashboard');
         showToast(`Saved ${payload.inserted.toLocaleString('en-IN')} CSV rows to MongoDB`);
@@ -2453,6 +2649,8 @@ function App() {
       }
 
       setReports(parsed.reports.map((row) => decorateUiReport(row, { sourceType: 'csv_browser', sourceName: file.name })));
+      setPeriodEnd(latestReportDate(parsed.reports));
+      setPeriodDays('all');
       setWeatherByCity(ENV);
       setWeatherSource('demo');
       setManualValidations({});
@@ -2509,8 +2707,12 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (auth) loadReports(true);
+    if (auth) loadDatasets();
   }, [auth]);
+
+  useEffect(() => {
+    if (auth && activeDatasetId) loadReports(false, activeDatasetId);
+  }, [auth, activeDatasetId]);
 
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -2519,7 +2721,7 @@ function App() {
   const content = {
     dashboard: (
       <Dashboard
-        reports={reports}
+        reports={analysisReports}
         alerts={alerts}
         setPage={setPage}
         layers={layers}
@@ -2532,11 +2734,19 @@ function App() {
         empty={empty}
         uploadInfo={uploadInfo}
         onCsvUpload={handleCsvUpload}
+        periodDays={periodDays}
+        setPeriodDays={setPeriodDays}
+        periodLabel={periodLabel}
+        periodEmpty={Boolean(uploadedDataset && datasetReports.length && !analysisReports.length)}
+        alertsUnavailable={uploadedDataset}
+        datasets={datasets}
+        activeDatasetId={activeDatasetId}
+        onDatasetChange={changeDataset}
       />
     ),
     reports: (
       <ReportsPage
-        reports={reports}
+        reports={datasetReports}
         setReports={setReports}
         filters={filters}
         setFilters={setFilters}
@@ -2548,7 +2758,7 @@ function App() {
     ),
     alerts: (
       <AlertsPage
-        reports={reports}
+        reports={analysisReports}
         alerts={alerts}
         activeCity={activeCity}
         setActiveCity={setActiveCity}
@@ -2558,7 +2768,7 @@ function App() {
         envByCity={weatherByCity}
       />
     ),
-    pipeline: <PipelinePage reports={reports} alerts={alerts} live={live} empty={empty} uploadInfo={uploadInfo} envByCity={weatherByCity} weatherSource={weatherSource} />,
+    pipeline: <PipelinePage reports={analysisReports} alerts={alerts} live={live} empty={empty} uploadInfo={uploadInfo} envByCity={weatherByCity} weatherSource={weatherSource} />,
     admin: <AdminPage auth={auth} showToast={showToast} />,
   }[page];
 

@@ -1,14 +1,17 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const path = require('path');
 const mongoose = require('mongoose');
 const User = require('./models/User');
 const { ROLE_PERMISSIONS, authenticateUser, createToken, ensureConfiguredUsers, readAuthUser, revokeToken, requirePermission } = require('./auth');
 
 const mongoUri = process.env.MONGO_URI || process.env.MONGODB_URI;
 let databaseReady = Promise.resolve(false);
+let databaseConnectAttempt = null;
+let authSchemaReady = false;
+let authSchemaInitialized = false;
 
 const app = express();
 const allowedOrigins = (process.env.CORS_ORIGIN || '')
@@ -80,11 +83,14 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/signup', async (req, res) => {
   try {
     await databaseReady;
+    if (mongoose.connection.readyState !== 1 || !authSchemaReady) {
+      await connectDatabase();
+    }
   } catch {
-    // The connection attempt is logged at startup; keep credentials and URI details out of the response.
+    // Detailed connection errors are logged by connectDatabase; keep URI details out of the response.
   }
-  if (mongoose.connection.readyState !== 1) {
-    return res.status(503).json({ error: 'Signup is unavailable until the authentication database is connected.' });
+  if (mongoose.connection.readyState !== 1 || !authSchemaReady) {
+    return res.status(503).json({ error: 'Signup is temporarily unavailable because the authentication database is not ready. Please try again shortly.' });
   }
 
   const username = String(req.body.username || req.body.email || '').trim().toLowerCase();
@@ -95,9 +101,8 @@ app.post('/api/auth/signup', async (req, res) => {
     return res.status(400).json({ error: 'Enter a valid username or email address.' });
   }
   if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  if (await User.exists({ username })) return res.status(409).json({ error: 'That username is already registered.' });
-
   try {
+    if (await User.exists({ username })) return res.status(409).json({ error: 'That username is already registered.' });
     const user = new User({ username, role: 'viewer', active: true });
     user.setPassword(password);
     await user.save();
@@ -105,7 +110,10 @@ app.post('/api/auth/signup', async (req, res) => {
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ error: 'That username is already registered.' });
     console.error('Signup database operation failed:', error.message);
-    return res.status(400).json({ error: 'Could not create this account.' });
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ error: 'Signup is temporarily unavailable because the authentication database disconnected. Please try again shortly.' });
+    }
+    return res.status(500).json({ error: 'Could not create this account. Please try again.' });
   }
 });
 app.post('/api/auth/logout', (req, res) => {
@@ -150,15 +158,30 @@ const connectDatabase = async () => {
     return false;
   }
 
-  const timeout = Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 10000);
-  mongoose.connection.on('connected', () => console.log('MongoDB connected'));
-  mongoose.connection.on('disconnected', () => console.warn('MongoDB disconnected'));
-  mongoose.connection.on('error', (error) => console.error('MongoDB connection error:', error.message));
+  if (mongoose.connection.readyState === 1 && authSchemaReady) return true;
+  if (databaseConnectAttempt) return databaseConnectAttempt;
 
-  return mongoose.connect(mongoUri, {
+  const timeout = Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 10000);
+  if (!mongoose.connection.listenerCount('connected')) {
+    mongoose.connection.on('connected', () => {
+      console.log('MongoDB connected');
+      authSchemaReady = authSchemaInitialized;
+      if (authSchemaReady) databaseReady = Promise.resolve(true);
+    });
+    mongoose.connection.on('disconnected', () => {
+      authSchemaReady = false;
+      console.warn('MongoDB disconnected');
+    });
+    mongoose.connection.on('error', (error) => console.error('MongoDB connection error:', error.message));
+  }
+
+  databaseConnectAttempt = mongoose.connect(mongoUri, {
     serverSelectionTimeoutMS: Number.isFinite(timeout) ? Math.max(1000, Math.min(timeout, 30000)) : 10000,
   })
     .then(async () => {
+      await User.init();
+      authSchemaInitialized = true;
+      authSchemaReady = true;
       await ensureConfiguredUsers();
       console.log('Auth users ready');
       return true;
@@ -166,7 +189,10 @@ const connectDatabase = async () => {
     .catch((error) => {
       console.error('MongoDB connection failed; database-backed signup and persistence are unavailable:', error.message);
       return false;
-    });
+    })
+    .finally(() => { databaseConnectAttempt = null; });
+
+  return databaseConnectAttempt;
 };
 
 databaseReady = connectDatabase();

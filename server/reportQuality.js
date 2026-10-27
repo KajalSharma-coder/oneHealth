@@ -54,6 +54,7 @@ function assessReportQuality(report) {
 function withReportQuality(report, provenance = {}) {
   const next = {
     ...report,
+    datasetId: provenance.datasetId || report.datasetId,
     sourceType: provenance.sourceType || report.sourceType || 'manual',
     sourceName: provenance.sourceName || report.sourceName,
     sourceUploadedBy: provenance.sourceUploadedBy || report.sourceUploadedBy,

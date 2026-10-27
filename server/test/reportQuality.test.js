@@ -51,3 +51,12 @@ test('report quality attaches provenance and scores complete reports highly', ()
   assert.equal(report.qualityFlags.length, 0);
   assert.ok(report.dataQualityScore >= 90);
 });
+
+test('report quality preserves dataset identity during CSV imports', () => {
+  const report = withReportQuality({ disease: 'Dengue', sector: 'human', location: 'Delhi', cases: 2 }, {
+    datasetId: 'dataset-a',
+    sourceType: 'csv',
+    sourceName: 'a.csv',
+  });
+  assert.equal(report.datasetId, 'dataset-a');
+});

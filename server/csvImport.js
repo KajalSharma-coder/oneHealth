@@ -1,8 +1,8 @@
 const { Readable } = require('stream');
 const csv = require('csv-parser');
 
-const SECTORS = new Set(['human', 'animal', 'environment']);
-const MAX_ROWS = 1000;
+const SECTORS = new Set(['human', 'animal', 'environment', 'unknown']);
+const MAX_ROWS = 20000;
 
 const CSV_HEADERS = {
   location: ['city', 'location', 'district', 'state', 'province', 'region', 'area', 'place', 'address', 'station'],
@@ -24,18 +24,25 @@ const CSV_HEADERS = {
     'metric',
     'variable',
   ],
-  sector: ['sector', 'source', 'type', 'category', 'domain', 'report_type'],
-  cases: ['cases', 'case_count', 'count', 'total', 'value', 'number', 'num_cases', 'confirmed', 'incidence', 'deaths', 'patients'],
-  date: ['date', 'report_date', 'onset_date', 'created_at', 'updated_at', 'observation_date', 'year', 'month'],
+  sector: ['sector', 'type', 'category', 'report_type'],
+  cases: ['cases', 'case_count', 'count', 'total', 'value', 'number', 'num_cases', 'confirmed', 'incidence', 'patients'],
+  date: ['date', 'report_date', 'onset_date', 'created_at', 'updated_at', 'observation_date'],
+  year: ['year'],
+  weekNumber: ['week_number', 'week', 'epi_week'],
   lat: ['lat', 'latitude'],
   lon: ['lon', 'lng', 'long', 'longitude'],
   species: ['species', 'animal_species', 'livestock_species', 'animal_type'],
   symptoms: ['symptoms', 'clinical_signs', 'signs', 'remarks', 'notes'],
-  mortality: ['mortality', 'deaths', 'dead', 'fatalities', 'animal_deaths'],
+  mortality: ['deaths', 'mortality', 'dead', 'fatalities', 'animal_deaths'],
   vaccinationStatus: ['vaccination_status', 'vaccinated', 'vaccine_status', 'immunization_status'],
   confirmationStatus: ['confirmation_status', 'lab_status', 'test_status', 'confirmed_status', 'case_status'],
   farmId: ['farm_id', 'farm', 'premise_id', 'holding_id', 'owner_id'],
   block: ['block', 'tehsil', 'taluka', 'village', 'panchayat'],
+  temperature: ['temperature_celsius_derived', 'temperature_celsius', 'temperature', 'temp'],
+  precipitation: ['precipitation_mm_source', 'precipitation_mm', 'precipitation', 'rainfall'],
+  sourceDataset: ['source_dataset'],
+  sourceUrl: ['source_url', 'url'],
+  synthetic: ['is_synthetic', 'synthetic'],
 };
 
 const norm = (value) =>
@@ -46,7 +53,8 @@ const norm = (value) =>
     .replace(/^_+|_+$/g, '');
 
 const findKey = (keys, names) =>
-  keys.find((key) => key && names.some((name) => key === name || key.includes(name) || name.includes(key)));
+  keys.find((key) => key && names.includes(key))
+    || keys.find((key) => key && names.some((name) => key.includes(name) || name.includes(key)));
 
 const findKeys = (keys, names) =>
   keys.filter((key) => key && names.some((name) => key === name || key.includes(name) || name.includes(key)));
@@ -56,16 +64,23 @@ const cleanText = (value, max = 80) => String(value ?? '').trim().slice(0, max);
 
 function parseCases(value) {
   const number = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(number) || number <= 0 || number > 500) return null;
+  if (!Number.isFinite(number) || number <= 0 || number > 1000000000) return null;
   return Math.round(number);
 }
 
-function parseCount(value, fallback = 0) {
+function parseCount(value, fallback = undefined) {
   const raw = String(value ?? '').trim();
   if (!raw) return fallback;
   const number = Number(raw.replace(/[^0-9.-]/g, ''));
   if (!Number.isFinite(number) || number < 0 || number > 500) return null;
   return Math.round(number);
+}
+
+function parseMeasurement(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return undefined;
+  const number = Number(raw.replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function normalizeEnum(value, allowed, fallback) {
@@ -103,16 +118,18 @@ function parseDateValue(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function detectSector(row, sectorKey, diseaseText) {
+function detectSector(row, sectorKey, diseaseText, sourceDataset = '') {
   const explicit = norm(cell(row, sectorKey));
   if (explicit.includes('animal') || explicit.includes('livestock') || explicit.includes('veterinary')) return 'animal';
   if (explicit.includes('environment') || explicit.includes('weather') || explicit.includes('water') || explicit.includes('climate')) return 'environment';
   if (explicit.includes('human') || explicit.includes('patient') || explicit.includes('hospital')) return 'human';
 
-  const joined = norm(`${Object.values(row).join(' ')} ${diseaseText}`);
+  const joined = norm(`${diseaseText} ${cell(row, findKey(Object.keys(row), CSV_HEADERS.species))} ${cell(row, findKey(Object.keys(row), CSV_HEADERS.symptoms))}`);
   if (/animal|livestock|cattle|cow|goat|poultry|chicken|avian|veterinary|farm/.test(joined)) return 'animal';
   if (/rain|rainfall|water|temperature|weather|climate|heat|air|pollution|pm2|environment/.test(joined)) return 'environment';
-  return 'human';
+  if (/human|patient|hospital|clinic|people|person|clinical/.test(joined)) return 'human';
+  if (/epiclim|disease.?climate|epidemic|health.?dataset/.test(norm(sourceDataset))) return 'human';
+  return 'unknown';
 }
 
 function validateHeaders(keys) {
@@ -167,6 +184,8 @@ async function parseReportCsvBuffer(buffer) {
   const sectorKey = findKey(keys, CSV_HEADERS.sector);
   const caseKey = findKey(keys, CSV_HEADERS.cases);
   const dateKey = findKey(keys, CSV_HEADERS.date);
+  const yearKey = findKey(keys, CSV_HEADERS.year);
+  const weekNumberKey = findKey(keys, CSV_HEADERS.weekNumber);
   const latKey = findKey(keys, CSV_HEADERS.lat);
   const lonKey = findKey(keys, CSV_HEADERS.lon);
   const speciesKey = findKey(keys, CSV_HEADERS.species);
@@ -176,6 +195,13 @@ async function parseReportCsvBuffer(buffer) {
   const confirmationKey = findKey(keys, CSV_HEADERS.confirmationStatus);
   const farmKey = findKey(keys, CSV_HEADERS.farmId);
   const blockKey = findKey(keys, CSV_HEADERS.block);
+  const temperatureKey = findKey(keys, CSV_HEADERS.temperature);
+  const precipitationKey = findKey(keys, CSV_HEADERS.precipitation);
+  const sourceDatasetKey = findKey(keys, CSV_HEADERS.sourceDataset);
+  const sourceUrlKey = findKey(keys, CSV_HEADERS.sourceUrl);
+  const syntheticKey = findKey(keys, CSV_HEADERS.synthetic);
+  const stateKey = findKey(keys, ['state']);
+  const districtKey = findKey(keys, ['district']);
 
   const reports = [];
   let skipped = 0;
@@ -188,14 +214,21 @@ async function parseReportCsvBuffer(buffer) {
 
     const latitude = parseCoord(cell(row, latKey), -90, 90);
     const longitude = parseCoord(cell(row, lonKey), -180, 180);
-    const location = cleanText(locationKeys.map((key) => cell(row, key)).find(Boolean) || (latitude !== undefined && longitude !== undefined ? `Point ${index + 1}` : ''));
+    const location = cleanText(
+      cell(row, findKey(keys, ['location']))
+        || cell(row, findKey(keys, ['city']))
+        || cell(row, districtKey)
+        || cell(row, stateKey)
+        || (latitude !== undefined && longitude !== undefined ? `Point ${index + 1}` : ''),
+    );
     const cases = parseCases(cell(row, caseKey));
-    const mortality = parseCount(cell(row, mortalityKey));
-    const date = parseDateValue(cell(row, dateKey));
+    const mortality = parseCount(cell(row, mortalityKey), undefined);
+    const date = parseDateValue(cell(row, dateKey)) || parseDateValue(cell(row, yearKey));
     const disease = cleanText(cell(row, diseaseKey) || 'Imported CSV signal');
-    const sector = detectSector(row, sectorKey, disease);
+    const sourceDataset = cleanText(cell(row, sourceDatasetKey), 120);
+    const sector = detectSector(row, sectorKey, disease, sourceDataset);
 
-    if (!location || !cases || mortality === null || date === null || !SECTORS.has(sector)) {
+    if (!location || !cases || mortality === null || !date || !SECTORS.has(sector)) {
       skipped += 1;
       return;
     }
@@ -210,11 +243,20 @@ async function parseReportCsvBuffer(buffer) {
       species: cleanText(cell(row, speciesKey), 60) || undefined,
       symptoms: cleanText(cell(row, symptomsKey), 240) || undefined,
       mortality,
+      deaths: mortality,
       vaccinationStatus: normalizeEnum(cell(row, vaccinationKey), new Set(['unknown', 'vaccinated', 'partial', 'unvaccinated']), 'unknown'),
       confirmationStatus: normalizeEnum(cell(row, confirmationKey), new Set(['suspected', 'lab_confirmed']), 'suspected'),
       farmId: cleanText(cell(row, farmKey), 80) || undefined,
       block: cleanText(cell(row, blockKey), 80) || undefined,
-      date: date || new Date(),
+      state: cleanText(cell(row, stateKey), 80) || undefined,
+      district: cleanText(cell(row, districtKey), 80) || undefined,
+      weekNumber: cleanText(cell(row, weekNumberKey), 20) || undefined,
+      temperatureCelsius: parseMeasurement(cell(row, temperatureKey)),
+      precipitationMm: parseMeasurement(cell(row, precipitationKey)),
+      sourceDataset: sourceDataset || undefined,
+      sourceUrl: cleanText(cell(row, sourceUrlKey), 500) || undefined,
+      isSynthetic: /^(true|1|yes)$/i.test(cell(row, syntheticKey)),
+      date,
     });
   });
 
