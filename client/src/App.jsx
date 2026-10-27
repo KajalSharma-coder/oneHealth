@@ -17,6 +17,53 @@ const COLORS = {
 };
 
 const AUTH_STORAGE_KEY = 'onehealth-auth';
+const BROWSER_DATASET_STORAGE_KEY = 'onehealth-browser-dataset';
+const BROWSER_MODE_STORAGE_KEY = 'onehealth-browser-mode';
+
+function openBrowserDatasetStore() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error('IndexedDB unavailable'));
+    const request = window.indexedDB.open('onehealth-local-data', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('datasets');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveBrowserDataset(dataset) {
+  const db = await openBrowserDatasetStore();
+  await new Promise((resolve, reject) => {
+    const request = db.transaction('datasets', 'readwrite').objectStore('datasets').put(dataset, BROWSER_DATASET_STORAGE_KEY);
+    request.onsuccess = resolve;
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+}
+
+async function readBrowserDataset() {
+  const db = await openBrowserDatasetStore();
+  const dataset = await new Promise((resolve, reject) => {
+    const request = db.transaction('datasets', 'readonly').objectStore('datasets').get(BROWSER_DATASET_STORAGE_KEY);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return dataset;
+}
+
+async function clearBrowserDataset() {
+  try {
+    const db = await openBrowserDatasetStore();
+    await new Promise((resolve, reject) => {
+      const request = db.transaction('datasets', 'readwrite').objectStore('datasets').delete(BROWSER_DATASET_STORAGE_KEY);
+      request.onsuccess = resolve;
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+  } catch {
+    // Local persistence is optional; server-backed datasets remain unaffected.
+  }
+}
 const can = (auth, permission) => auth?.user?.permissions?.includes(permission);
 
 const DISEASES = {
@@ -2297,7 +2344,7 @@ function App() {
   const [toast, setToast] = useState('');
   const [uploadInfo, setUploadInfo] = useState(null);
   const [datasets, setDatasets] = useState([]);
-  const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem('onehealth-dataset-id') || '');
+  const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1' ? '' : window.localStorage.getItem('onehealth-dataset-id') || '');
   const [periodDays, setPeriodDays] = useState(7);
   const [periodEnd, setPeriodEnd] = useState(null);
   const [weatherByCity, setWeatherByCity] = useState(ENV);
@@ -2502,7 +2549,30 @@ function App() {
     showToast(`Response set to ${RESPONSE_STATUSES[responseStatus] || responseStatus} in demo mode`);
   };
 
+  const restoreBrowserDataset = async () => {
+    try {
+      const saved = await readBrowserDataset();
+      if (!saved?.reports?.length) return false;
+      setReports(saved.reports);
+      setPeriodEnd(saved.periodEnd ? new Date(saved.periodEnd) : latestReportDate(saved.reports));
+      setPeriodDays('all');
+      setUploadInfo({ name: saved.name, rows: saved.reports.length, skipped: saved.skipped || 0, saved: false });
+      setLive(false);
+      setEmpty(false);
+      setActiveCity(saved.reports[0]?.loc ?? null);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const loadDatasets = async (preferredId = '') => {
+    if (window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1') {
+      setDatasets([]);
+      setActiveDatasetId('');
+      await restoreBrowserDataset();
+      return '';
+    }
     try {
       const response = await fetch('/api/reports/datasets', { headers: { Authorization: `Bearer ${auth?.token}` } });
       if (!response.ok) throw new Error('dataset list failed');
@@ -2607,6 +2677,8 @@ function App() {
   };
 
   const changeDataset = (datasetId) => {
+    window.localStorage.removeItem(BROWSER_MODE_STORAGE_KEY);
+    clearBrowserDataset();
     setActiveDatasetId(datasetId);
     window.localStorage.setItem('onehealth-dataset-id', datasetId);
     setSelectedLocation(null);
@@ -2659,6 +2731,8 @@ function App() {
         if (!response.ok) throw new Error(payload.error || 'CSV import failed');
 
         await loadDatasets(payload.datasetId);
+        window.localStorage.removeItem(BROWSER_MODE_STORAGE_KEY);
+        clearBrowserDataset();
         if (payload.datasetId) await loadReports(false, payload.datasetId);
         if (payload.dateRange?.max) setPeriodEnd(new Date(payload.dateRange.max));
         setPeriodDays('all');
@@ -2685,8 +2759,13 @@ function App() {
         return;
       }
 
-      setReports(parsed.reports.map((row) => decorateUiReport(row, { sourceType: 'csv_browser', sourceName: file.name })));
-      setPeriodEnd(latestReportDate(parsed.reports));
+      const browserReports = parsed.reports.map((row) => decorateUiReport(row, { sourceType: 'csv_browser', sourceName: file.name }));
+      await saveBrowserDataset({ name: file.name, reports: browserReports, skipped: parsed.skipped, periodEnd: latestReportDate(browserReports) });
+      window.localStorage.setItem(BROWSER_MODE_STORAGE_KEY, '1');
+      window.localStorage.removeItem('onehealth-dataset-id');
+      setActiveDatasetId('');
+      setReports(browserReports);
+      setPeriodEnd(latestReportDate(browserReports));
       setPeriodDays('all');
       setWeatherByCity(ENV);
       setWeatherSource('demo');
