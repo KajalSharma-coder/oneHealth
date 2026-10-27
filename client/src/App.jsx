@@ -847,7 +847,9 @@ function Header({ page, setPage, alertCount, live, empty, uploadInfo, auth, onLo
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [busy, setBusy] = useState(false);
-  const liveText = uploadInfo ? 'CSV live feed' : live ? (empty ? 'Database empty, showing demo data' : 'Connected to database') : 'Demo data';
+  const liveText = uploadInfo
+    ? (uploadInfo.saved ? 'Database dataset' : 'Browser-only dataset')
+    : live ? (empty ? 'Database empty' : 'Connected to database') : 'No dataset loaded';
   const items = [
     ['dashboard', 'Dashboard'],
     ['reports', 'Reports'],
@@ -1445,6 +1447,10 @@ function Dashboard({
   activeDatasetId,
   onDatasetChange,
 }) {
+  const [showDatasetStatus, setShowDatasetStatus] = useState(true);
+  useEffect(() => {
+    setShowDatasetStatus(true);
+  }, [uploadInfo?.name, uploadInfo?.rows, uploadInfo?.saved]);
   const week = (sector) => reports.filter((row) => !sector || row.sec === sector);
   const locationCount = getReportLocations(reports).length;
   const metrics = calculateDashboardMetrics(reports);
@@ -1479,11 +1485,26 @@ function Dashboard({
         Records from {locationCount.toLocaleString('en-IN')} mapped locations. {periodLabel}.
       </Top>
 
-      {uploadInfo ? (
-        <div className="mb-5 rounded-tool border border-env/40 bg-card p-4 text-sm text-ink">
-          <b className="font-display">CSV live upload active:</b> {uploadInfo.rows.toLocaleString('en-IN')} rows from {uploadInfo.name} are powering the map,
-          charts and alerts {uploadInfo.saved ? 'from MongoDB.' : 'in this browser only. MongoDB was not touched.'}
-          {uploadInfo.skipped ? <span className="text-mute"> {uploadInfo.skipped.toLocaleString('en-IN')} older or blank rows were ignored.</span> : null}
+      {uploadInfo && showDatasetStatus ? (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-tool border border-line bg-card px-3 py-2.5 text-xs text-ink">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <span className={`rounded-full px-2 py-0.5 font-semibold ${uploadInfo.saved ? 'bg-env/15 text-env' : 'bg-animal/15 text-animal'}`}>
+              {uploadInfo.saved ? 'Database-persisted' : 'Browser-only'}
+            </span>
+            <span className="truncate font-medium" title={uploadInfo.name}>{uploadInfo.name}</span>
+            <span className="text-mute">{uploadInfo.rows.toLocaleString('en-IN')} rows</span>
+            <span className="text-mute">{uploadInfo.saved ? 'stored in the database' : 'stored only in this browser'}</span>
+            {uploadInfo.skipped ? <span className="text-mute">· {uploadInfo.skipped.toLocaleString('en-IN')} skipped</span> : null}
+          </div>
+          <button
+            type="button"
+            className="shrink-0 rounded px-2 py-1 text-base leading-none text-mute hover:bg-mute/10 hover:text-ink"
+            aria-label="Dismiss dataset status"
+            title="Dismiss"
+            onClick={() => setShowDatasetStatus(false)}
+          >
+            ×
+          </button>
         </div>
       ) : null}
 
