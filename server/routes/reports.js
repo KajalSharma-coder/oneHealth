@@ -6,6 +6,7 @@ const { datasetIdForBuffer, legacyDatasetId } = require('../datasetIdentity');
 const { requirePermission, writeAudit } = require('../auth');
 const { parseReportCsvBuffer } = require('../csvImport');
 const { withReportQuality } = require('../reportQuality');
+const { ALL_DATASETS, isAllDatasets, sharedReportFilter } = require('../datasetScope');
 
 const SECTORS = new Set(['human', 'animal', 'environment']);
 const MAX_CSV_FILE_SIZE = 100 * 1024 * 1024;
@@ -94,8 +95,10 @@ router.get('/', requirePermission('reports:read'), async (req, res) => {
   try {
     const sector = cleanText(req.query.sector);
     const location = cleanText(req.query.location);
-    const filter = {};
-    if (req.query.datasetId) Object.assign(filter, datasetFilter(String(req.query.datasetId)));
+    const datasetId = req.query.datasetId ? String(req.query.datasetId) : ALL_DATASETS;
+    const filter = isAllDatasets(datasetId)
+      ? sharedReportFilter(await Dataset.find({ status: 'ready' }).distinct('datasetId'))
+      : datasetFilter(datasetId);
 
     if (sector) {
       if (!SECTORS.has(sector)) return res.status(400).json({ error: 'sector must be human, animal or environment' });

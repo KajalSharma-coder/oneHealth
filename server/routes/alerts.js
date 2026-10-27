@@ -4,15 +4,20 @@ const AlertValidation = require('../models/AlertValidation');
 const detect = require('../detect');
 const { requirePermission, writeAudit } = require('../auth');
 const { selectAnalysisWindow } = require('../alertWindow');
+const Dataset = require('../models/Dataset');
+const { ALL_DATASETS, isAllDatasets, sharedReportFilter } = require('../datasetScope');
 
 const DAY = 24 * 60 * 60 * 1000;
 const datasetFilter = (datasetId) => datasetId?.startsWith('legacy:')
   ? { datasetId: { $exists: false }, sourceName: decodeURIComponent(datasetId.slice('legacy:'.length)) }
   : { datasetId };
 const analysisWindow = async (datasetId) => {
-  const filter = datasetId ? datasetFilter(datasetId) : {};
+  const scope = datasetId || ALL_DATASETS;
+  const filter = isAllDatasets(scope)
+    ? sharedReportFilter(await Dataset.find({ status: 'ready' }).distinct('datasetId'))
+    : datasetFilter(scope);
   const rows = await Report.find(filter).lean();
-  return selectAnalysisWindow(rows, datasetId);
+  return selectAnalysisWindow(rows, scope);
 };
 const cleanLocation = (value) => String(value || '').trim().slice(0, 80);
 const cleanNote = (value) => String(value || '').trim().slice(0, 240);
@@ -47,7 +52,7 @@ const attachManualValidation = async (alerts) => {
 // GET /api/alerts
 router.get('/alerts', requirePermission('alerts:read'), async (req, res) => {
   try {
-    const datasetId = req.query.datasetId ? String(req.query.datasetId) : '';
+    const datasetId = req.query.datasetId ? String(req.query.datasetId) : ALL_DATASETS;
     const { reports, referenceDate } = await analysisWindow(datasetId);
     const alerts = await detect(reports, referenceDate);
     const diagnostics = await detect.diagnostics(reports, referenceDate);
@@ -133,7 +138,7 @@ router.get('/ml/model', async (req, res) => {
 
 // GET /api/dashboard/stats
 router.get('/dashboard/stats', requirePermission('reports:read'), async (req, res) => {
-  const { reports, referenceDate } = await analysisWindow(req.query.datasetId ? String(req.query.datasetId) : '');
+  const { reports, referenceDate } = await analysisWindow(req.query.datasetId ? String(req.query.datasetId) : ALL_DATASETS);
   const week = { human: 0, animal: 0, environment: 0 };
   const prevWeek = { ...week };
   for (const r of reports) {

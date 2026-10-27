@@ -750,18 +750,19 @@ function CsvUploadButton({ onUpload }) {
   );
 }
 
-function DatasetSelector({ datasets, activeDatasetId, onChange }) {
+function DatasetSelector({ datasets, activeDatasetId, onChange, canFilterIndividual }) {
   if (!datasets.length) return null;
   const active = datasets.find((dataset) => dataset.datasetId === activeDatasetId);
   return (
     <label className="grid min-w-[250px] gap-1 text-xs text-mute">
       Active dataset
       <select className="rounded border border-line bg-card px-2.5 py-2 text-sm text-ink" value={activeDatasetId || ''} onChange={(event) => onChange(event.target.value)}>
-        {datasets.map((dataset) => (
+        <option value="all">All ready datasets (shared)</option>
+        {canFilterIndividual ? datasets.map((dataset) => (
           <option key={dataset.datasetId} value={dataset.datasetId} disabled={dataset.status === 'failed'}>
             {dataset.fileName} · {(dataset.importedRows ?? dataset.rowCount ?? 0).toLocaleString('en-IN')} rows
           </option>
-        ))}
+        )) : null}
       </select>
       {active ? <span>{active.dateMin ? `${new Date(active.dateMin).toLocaleDateString('en-IN')} – ${new Date(active.dateMax).toLocaleDateString('en-IN')}` : 'Date range unavailable'} · {active.status}</span> : null}
     </label>
@@ -1510,7 +1511,7 @@ function Dashboard({
       ) : null}
 
       <div className="mb-5 flex flex-wrap items-center gap-3 rounded-tool border border-line bg-card p-3 text-sm text-mute">
-        <DatasetSelector datasets={datasets} activeDatasetId={activeDatasetId} onChange={onDatasetChange} />
+        <DatasetSelector datasets={datasets} activeDatasetId={activeDatasetId} onChange={onDatasetChange} canFilterIndividual={can(auth, 'users:manage')} />
         <label className="font-semibold text-ink" htmlFor="report-period">Reporting period</label>
         <select id="report-period" className="rounded border border-line bg-card px-2 py-1 text-ink" value={periodDays} onChange={(event) => setPeriodDays(event.target.value === 'all' ? 'all' : Number(event.target.value))}>
           <option value={7}>Last 7 days</option>
@@ -2374,7 +2375,7 @@ function App() {
   const [toast, setToast] = useState('');
   const [uploadInfo, setUploadInfo] = useState(null);
   const [datasets, setDatasets] = useState([]);
-  const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1' ? '' : window.localStorage.getItem('onehealth-dataset-id') || '');
+  const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1' ? '' : window.localStorage.getItem('onehealth-dataset-id') || 'all');
   const [periodDays, setPeriodDays] = useState(7);
   const [periodEnd, setPeriodEnd] = useState(null);
   const [weatherByCity, setWeatherByCity] = useState(ENV);
@@ -2610,10 +2611,12 @@ function App() {
       setDatasets(nextDatasets);
       const savedId = preferredId || window.localStorage.getItem('onehealth-dataset-id') || '';
       const selectable = nextDatasets.filter((dataset) => dataset.status === 'ready' || dataset.status === 'legacy');
-      const selected = selectable.find((dataset) => dataset.datasetId === savedId) || selectable[0];
-      const nextId = selected?.datasetId || '';
+      const selected = can(auth, 'users:manage') && savedId
+        ? selectable.find((dataset) => dataset.datasetId === savedId)
+        : null;
+      const nextId = selected?.datasetId || 'all';
       setActiveDatasetId(nextId);
-      if (nextId) window.localStorage.setItem('onehealth-dataset-id', nextId);
+      window.localStorage.setItem('onehealth-dataset-id', nextId);
       return nextId;
     } catch {
       setDatasets([]);
@@ -2891,7 +2894,7 @@ function App() {
         setPeriodDays={setPeriodDays}
         periodLabel={periodLabel}
         periodEmpty={Boolean(uploadedDataset && datasetReports.length && !analysisReports.length)}
-        alertsUnavailable={uploadedDataset}
+        alertsUnavailable={false}
         datasets={datasets}
         activeDatasetId={activeDatasetId}
         onDatasetChange={changeDataset}

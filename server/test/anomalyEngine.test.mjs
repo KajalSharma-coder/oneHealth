@@ -115,3 +115,13 @@ test('climate-only observations affect weather features but cannot create diseas
   assert.deepEqual(alerts, []);
   assert.match(alertDiagnostics(reports, { now: NOW })[0].message, /baseline coverage|recent disease activity/);
 });
+
+test('combined reports from multiple dataset uploads produce one shared alert scope', () => {
+  const reports = [];
+  for (let day = 7; day < 30; day += 1) reports.push({ datasetId: 'admin-a', ...datedReport({ day, cases: 1 }) });
+  for (let day = 0; day < 7; day += 1) reports.push({ datasetId: 'admin-b', ...datedReport({ day, cases: 3 }) });
+  const alerts = computeAlerts(reports, { now: NOW });
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].location, 'Jaipur');
+  assert.equal(alerts[0].recent, 21);
+});
