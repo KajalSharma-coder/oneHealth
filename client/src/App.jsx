@@ -1436,6 +1436,7 @@ function Dashboard({
   setSelectedLocation,
   live,
   empty,
+  auth,
   uploadInfo,
   onCsvUpload,
   periodDays,
@@ -1477,8 +1478,8 @@ function Dashboard({
         title={count ? `${count} ${count === 1 ? 'place needs' : 'places need'} a closer look this week` : 'No unusual rises this week'}
         action={
           <div className="flex flex-wrap gap-2">
-            <CsvUploadButton onUpload={onCsvUpload} />
-            <Button onClick={() => setPage('reports')}>Add a report</Button>
+            {can(auth, 'reports:write') ? <CsvUploadButton onUpload={onCsvUpload} /> : null}
+            {can(auth, 'reports:write') ? <Button onClick={() => setPage('reports')}>Add a report</Button> : null}
           </div>
         }
       >
@@ -1622,7 +1623,7 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
     .filter((row) => (filters.sec === 'all' || row.sec === filters.sec) && (filters.loc === 'all' || row.loc === filters.loc || row.district === filters.loc))
     .sort((a, b) => a.day - b.day || b.id - a.id);
   const rows = showAllReports ? filteredRows : filteredRows.slice(0, 10);
-  const canWrite = !live || can(auth, 'reports:write');
+  const canWrite = can(auth, 'reports:write');
 
   const updateForm = (patch) => {
     setForm((current) => {
@@ -1633,6 +1634,10 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
   };
 
   const saveReport = async () => {
+    if (!canWrite) {
+      showToast('Viewer accounts have read-only access');
+      return;
+    }
     const cases = Math.max(1, Math.min(500, Math.round(Number(form.cases) || 1)));
     const mortality = Math.max(0, Math.min(500, Math.round(Number(form.mortality) || 0)));
     const body = {
@@ -1702,7 +1707,7 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
     <>
       <Top title="Reports">Add an observation or filter what has been filed</Top>
 
-      <section className="mb-4 rounded-tool border border-line bg-card p-4">
+      {canWrite ? <section className="mb-4 rounded-tool border border-line bg-card p-4">
         <h3 className="font-display text-lg font-bold">New report</h3>
         <div className="mb-3 text-sm text-mute">
           {live && !canWrite ? 'Live database writes require analyst or admin login' : 'It appears on the dashboard right away'}
@@ -1779,7 +1784,11 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
             Save report
           </Button>
         </div>
-      </section>
+      </section> : (
+        <div className="mb-4 rounded-tool border border-line bg-card p-4 text-sm text-mute">
+          Reports are read-only for Viewer accounts. An authorized administrator or analyst can add new reports.
+        </div>
+      )}
 
       <div className="mb-3 flex flex-wrap gap-2.5">
         <Select value={filters.sec} aria-label="Filter by sector" onChange={(event) => setFilters((current) => ({ ...current, sec: event.target.value }))}>
@@ -2715,6 +2724,11 @@ function App() {
     if (!file) return;
     csvUploadToken.current += 1;
 
+    if (!can(auth, 'reports:write')) {
+      showToast('Viewer accounts cannot upload CSV datasets');
+      return;
+    }
+
     if (!file.name.toLowerCase().endsWith('.csv')) {
       showToast('Please upload a .csv file');
       return;
@@ -2870,6 +2884,7 @@ function App() {
         setSelectedLocation={setSelectedLocation}
         live={live}
         empty={empty}
+        auth={auth}
         uploadInfo={uploadInfo}
         onCsvUpload={handleCsvUpload}
         periodDays={periodDays}
