@@ -2286,7 +2286,7 @@ function DataTable({ headers, rows }) {
 
 function App() {
   const [page, setPage] = useState('dashboard');
-  const [reports, setReports] = useState(DEMO_REPORTS);
+  const [reports, setReports] = useState([]);
   const [live, setLive] = useState(false);
   const [empty, setEmpty] = useState(false);
   const [filters, setFilters] = useState({ sec: 'all', loc: 'all' });
@@ -2518,12 +2518,14 @@ function App() {
     } catch {
       setDatasets([]);
       setActiveDatasetId('');
+      setReports([]);
+      setLive(false);
+      setEmpty(true);
       return '';
     }
   };
 
   const loadReports = async (first = false, datasetId = activeDatasetId) => {
-    if (first) setReports(DEMO_REPORTS);
     const tokenAtStart = csvUploadToken.current;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 4000);
@@ -2588,13 +2590,17 @@ function App() {
         loadServerAlertContext(tokenAtStart, datasetId);
         loadWeatherContext(nextReports, tokenAtStart);
       } else {
+        setReports([]);
+        setUploadInfo(null);
+        setPeriodEnd(null);
         setManualValidations({});
         setServerAlerts([]);
         setAlertDiagnostics([]);
       }
     } catch {
+      setReports([]);
       setLive(false);
-      setEmpty(false);
+      setEmpty(true);
     } finally {
       window.clearTimeout(timeout);
     }
