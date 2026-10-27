@@ -1247,17 +1247,17 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
           </button>
         ))}
       </div>
-      <div className="mb-3 grid gap-2 text-[13px] sm:grid-cols-3 lg:grid-cols-5">
-        <label className="grid gap-1 text-[#9fb2c8]">
+      <div className="map-filter-grid mb-3 grid gap-2 text-[13px] sm:grid-cols-3 lg:grid-cols-6">
+        <label className="grid min-w-0 gap-1 text-[#9fb2c8]">
           Date range
-          <select className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.dateRange} onChange={(event) => updateMapFilter({ dateRange: event.target.value })}>
+          <select className="w-full min-w-0 truncate rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.dateRange} onChange={(event) => updateMapFilter({ dateRange: event.target.value })}>
             <option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All available dates</option>
           </select>
         </label>
-        <label className="grid gap-1 text-[#9fb2c8]">
+        <label className="grid min-w-0 gap-1 text-[#9fb2c8]">
           Sector
           <select
-            className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2] outline-none focus-visible:ring-2 focus-visible:ring-env"
+            className="w-full min-w-0 truncate rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2] outline-none focus-visible:ring-2 focus-visible:ring-env"
             value={mapFilters.sector}
             onChange={(event) => updateMapFilter({ sector: event.target.value })}
           >
@@ -1269,24 +1269,24 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-[#9fb2c8]">
+        <label className="grid min-w-0 gap-1 text-[#9fb2c8]">
           Disease
-          <select className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.disease} onChange={(event) => updateMapFilter({ disease: event.target.value })}>
+          <select className="w-full min-w-0 truncate rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.disease} onChange={(event) => updateMapFilter({ disease: event.target.value })}>
             <option value="all">All diseases/signals</option>
             {[...new Set(reports.map((row) => row.dis).filter(Boolean))].sort().map((disease) => <option key={disease} value={disease}>{disease}</option>)}
           </select>
         </label>
-        <label className="grid gap-1 text-[#9fb2c8]">
+        <label className="grid min-w-0 gap-1 text-[#9fb2c8]">
           Location
-          <select className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.location} onChange={(event) => updateMapFilter({ location: event.target.value })}>
+          <select className="w-full min-w-0 truncate rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.location} onChange={(event) => updateMapFilter({ location: event.target.value })}>
             <option value="all">All locations</option>
             {getReportLocations(reports).map((location) => <option key={location} value={location}>{location}</option>)}
           </select>
         </label>
-        <label className="grid gap-1 text-[#9fb2c8]">
+        <label className="grid min-w-0 gap-1 text-[#9fb2c8]">
           Alert level
           <select
-            className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2] outline-none focus-visible:ring-2 focus-visible:ring-env"
+            className="w-full min-w-0 truncate rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2] outline-none focus-visible:ring-2 focus-visible:ring-env"
             value={mapFilters.severity}
             onChange={(event) => updateMapFilter({ severity: event.target.value })}
           >
@@ -1295,10 +1295,10 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
             <option value="high">High risk</option>
           </select>
         </label>
-        <label className="grid gap-1 text-[#9fb2c8]">
+        <label className="grid min-w-0 gap-1 text-[#9fb2c8]">
           Min weekly cases
           <input
-            className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2] outline-none focus-visible:ring-2 focus-visible:ring-env"
+            className="w-full min-w-0 truncate rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2] outline-none focus-visible:ring-2 focus-visible:ring-env"
             min="0"
             type="number"
             value={mapFilters.minCases}
