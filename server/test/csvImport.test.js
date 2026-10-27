@@ -78,3 +78,15 @@ test('csv import preserves disease case values above the manual-entry limit', as
   assert.equal(parsed.error, undefined);
   assert.equal(parsed.reports[0].cases, 51225);
 });
+
+test('csv import accepts zero-case climate observations without turning measurements into cases', async () => {
+  const parsed = await parseReportCsvBuffer(Buffer.from([
+    'date,location,sector,cases,temperature_celsius,precipitation_mm,source_dataset,is_synthetic',
+    '2021-01-04,Jaipur,environment,0,18.5,0,weather-source,true',
+  ].join('\n')));
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.reports.length, 1);
+  assert.equal(parsed.reports[0].cases, 0);
+  assert.equal(parsed.reports[0].temperatureCelsius, 18.5);
+  assert.equal(parsed.reports[0].isSynthetic, true);
+});

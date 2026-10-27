@@ -6,6 +6,7 @@ import {
   cityStats,
   computeAlerts,
   isolationForestScores,
+  alertDiagnostics,
 } from '../../shared/anomalyEngine.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -102,4 +103,15 @@ test('ML score can raise an alert before rule thresholds fully cross', () => {
   assert.equal(alert.ml.modelVersion, ML_MODEL.version);
   assert.equal(alert.validation.modelVersion, ML_MODEL.version);
   assert.ok(alert.validation.checks.length >= 5);
+});
+
+test('climate-only observations affect weather features but cannot create disease alerts', () => {
+  const reports = Array.from({ length: 30 }, (_, day) => ({
+    location: 'Jaipur', sector: 'environment', disease: 'Weather observation', cases: 0,
+    temperatureCelsius: day < 7 ? 40 : 20, precipitationMm: day < 7 ? 0 : 10,
+    date: new Date(NOW.getTime() - day * DAY),
+  }));
+  const alerts = computeAlerts(reports, { now: NOW, env: {} });
+  assert.deepEqual(alerts, []);
+  assert.match(alertDiagnostics(reports, { now: NOW })[0].message, /baseline coverage|recent disease activity/);
 });

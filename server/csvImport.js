@@ -63,8 +63,9 @@ const cell = (row, key) => (key ? String(row[key] ?? '').trim() : '');
 const cleanText = (value, max = 80) => String(value ?? '').trim().slice(0, max);
 
 function parseCases(value) {
-  const number = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(number) || number <= 0 || number > 1000000000) return null;
+  const raw = String(value ?? '').trim();
+  const number = Number(raw.replace(/[^0-9.-]/g, ''));
+  if (!Number.isFinite(number) || number < 0 || number > 1000000000) return null;
   return Math.round(number);
 }
 
@@ -228,7 +229,9 @@ async function parseReportCsvBuffer(buffer) {
     const sourceDataset = cleanText(cell(row, sourceDatasetKey), 120);
     const sector = detectSector(row, sectorKey, disease, sourceDataset);
 
-    if (!location || !cases || mortality === null || !date || !SECTORS.has(sector)) {
+    const hasClimateObservation = sector === 'environment'
+      && (Number.isFinite(parseMeasurement(cell(row, temperatureKey))) || Number.isFinite(parseMeasurement(cell(row, precipitationKey))));
+    if (!location || cases === null || (cases === 0 && !hasClimateObservation) || mortality === null || !date || !SECTORS.has(sector)) {
       skipped += 1;
       return;
     }

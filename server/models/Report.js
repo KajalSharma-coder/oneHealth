@@ -7,7 +7,7 @@ module.exports = mongoose.model('Report', new mongoose.Schema({
   location: { type: String, required: true, trim: true },
   latitude: { type: Number, min: -90, max: 90 },
   longitude:{ type: Number, min: -180, max: 180 },
-  cases:    { type: Number, default: 1, min: 1, max: 1000000000 },
+  cases:    { type: Number, default: 1, min: 0, max: 1000000000 },
   species:  { type: String, trim: true, maxlength: 60 },
   symptoms: { type: String, trim: true, maxlength: 240 },
   mortality:{ type: Number, min: 0, max: 500 },

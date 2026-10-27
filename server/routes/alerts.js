@@ -3,9 +3,17 @@ const Report = require('../models/Report');
 const AlertValidation = require('../models/AlertValidation');
 const detect = require('../detect');
 const { requirePermission, writeAudit } = require('../auth');
+const { selectAnalysisWindow } = require('../alertWindow');
 
 const DAY = 24 * 60 * 60 * 1000;
-const last30Days = () => Report.find({ date: { $gte: new Date(Date.now() - 30 * DAY) } }).lean();
+const datasetFilter = (datasetId) => datasetId?.startsWith('legacy:')
+  ? { datasetId: { $exists: false }, sourceName: decodeURIComponent(datasetId.slice('legacy:'.length)) }
+  : { datasetId };
+const analysisWindow = async (datasetId) => {
+  const filter = datasetId ? datasetFilter(datasetId) : {};
+  const rows = await Report.find(filter).lean();
+  return selectAnalysisWindow(rows, datasetId);
+};
 const cleanLocation = (value) => String(value || '').trim().slice(0, 80);
 const cleanNote = (value) => String(value || '').trim().slice(0, 240);
 const VALID_STATUSES = new Set(['validated', 'review', 'dismissed']);
@@ -37,7 +45,23 @@ const attachManualValidation = async (alerts) => {
 };
 
 // GET /api/alerts
-router.get('/alerts', requirePermission('alerts:read'), async (req, res) => res.json(await attachManualValidation(await detect(await last30Days()))));
+router.get('/alerts', requirePermission('alerts:read'), async (req, res) => {
+  try {
+    const datasetId = req.query.datasetId ? String(req.query.datasetId) : '';
+    const { reports, referenceDate } = await analysisWindow(datasetId);
+    const alerts = await detect(reports, referenceDate);
+    const diagnostics = await detect.diagnostics(reports, referenceDate);
+    return res.json({
+      alerts: await attachManualValidation(alerts),
+      diagnostics,
+      datasetId: datasetId || null,
+      referenceDate: referenceDate.toISOString(),
+      analyzedRows: reports.length,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
 
 // POST /api/alerts/:location/validate  { status, note? }
 router.post('/alerts/:location/validate', requirePermission('alerts:validate'), async (req, res) => {
@@ -109,15 +133,15 @@ router.get('/ml/model', async (req, res) => {
 
 // GET /api/dashboard/stats
 router.get('/dashboard/stats', requirePermission('reports:read'), async (req, res) => {
-  const reports = await last30Days();
+  const { reports, referenceDate } = await analysisWindow(req.query.datasetId ? String(req.query.datasetId) : '');
   const week = { human: 0, animal: 0, environment: 0 };
   const prevWeek = { ...week };
   for (const r of reports) {
-    const day = Math.floor((Date.now() - r.date) / DAY);
+    const day = Math.floor((referenceDate - r.date) / DAY);
     if (day < 7) week[r.sector] += r.cases;
     else if (day < 14) prevWeek[r.sector] += r.cases;
   }
-  res.json({ week, prevWeek, activeAlerts: (await detect(reports)).length });
+  res.json({ week, prevWeek, activeAlerts: (await detect(reports, referenceDate)).length });
 });
 
 module.exports = router;

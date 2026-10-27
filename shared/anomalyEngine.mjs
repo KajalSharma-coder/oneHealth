@@ -55,6 +55,10 @@ const cityName = (report) => report.loc ?? report.location;
 const sectorName = (report) => report.sec ?? report.sector;
 const diseaseName = (report) => report.dis ?? report.disease ?? 'Unknown signal';
 const caseCount = (report) => Number(report.n ?? report.cases ?? 0) || 0;
+const measurement = (report, primary, alternate) => {
+  const value = Number(report[primary] ?? report[alternate]);
+  return Number.isFinite(value) ? value : null;
+};
 
 const hashText = (value) => {
   let hash = 2166136261;
@@ -88,16 +92,40 @@ export function buildCityBuckets(reports, now = new Date()) {
     const sector = sectorName(report);
     const day = dayIndex(report, now);
     const cases = caseCount(report);
+    const temperature = measurement(report, 'temperatureCelsius', 'temperature_celsius_derived');
+    const precipitation = measurement(report, 'precipitationMm', 'precipitation_mm_source');
 
-    if (!location || !sector || day === null || day < 0 || day > 29 || cases <= 0) continue;
+    if (!location || !sector || day === null || day < 0 || day > 29) continue;
 
-    const city = (cities[location] ??= { all: Array(30).fill(0), sector: {}, disease: {} });
-    city.all[day] += cases;
-    (city.sector[sector] ??= Array(30).fill(0))[day] += cases;
-    if (day < 7) city.disease[diseaseName(report)] = (city.disease[diseaseName(report)] || 0) + cases;
+    const city = (cities[location] ??= { all: Array(30).fill(0), sector: {}, disease: {}, weather: { temperature: [], precipitation: [] } });
+    if (cases > 0) {
+      city.all[day] += cases;
+      (city.sector[sector] ??= Array(30).fill(0))[day] += cases;
+      if (day < 7) city.disease[diseaseName(report)] = (city.disease[diseaseName(report)] || 0) + cases;
+    }
+    if (temperature !== null) (city.weather.temperature[day] ??= []).push(temperature);
+    if (precipitation !== null) (city.weather.precipitation[day] ??= []).push(precipitation);
   }
 
   return cities;
+}
+
+function weatherAnomaly(weather) {
+  const values = (weather || []).map((day) => (day?.length ? mean(day) : null));
+  const baseline = values.slice(7).filter((value) => value !== null);
+  const recent = values.slice(0, 7).filter((value) => value !== null);
+  if (baseline.length < 5 || recent.length < 1) return { anomaly: 0, observations: baseline.length + recent.length };
+  const baseMean = mean(baseline);
+  const baseSd = Math.sqrt(mean(baseline.map((value) => (value - baseMean) ** 2))) || 1;
+  return { anomaly: (mean(recent) - baseMean) / baseSd, observations: baseline.length + recent.length };
+}
+
+export function weatherStats(reports, location, now = new Date()) {
+  const city = buildCityBuckets(reports, now)[location];
+  return {
+    temperature: weatherAnomaly(city?.weather?.temperature),
+    precipitation: weatherAnomaly(city?.weather?.precipitation),
+  };
 }
 
 function cityStatsFromSeries(series) {
@@ -302,7 +330,11 @@ export function computeAlerts(reports, options = {}) {
     const stats = cityStatsFromSeries(city.all);
     const sectorsActive = SECTORS.filter((sector) => sum(city.sector[sector] ?? [], 0, 7) > 0).length;
     const load = corridors.filter(([from]) => from === location).reduce((total, route) => total + route[2], 0);
-    const env = envByCity[location] ?? [0, 0];
+    const weather = weatherStats(reports, location, now);
+    const fallbackEnv = envByCity[location] ?? [0, 0];
+    const env = weather.temperature.observations || weather.precipitation.observations
+      ? [weather.temperature.anomaly, weather.precipitation.anomaly]
+      : fallbackEnv;
 
     return {
       location,
@@ -313,7 +345,7 @@ export function computeAlerts(reports, options = {}) {
         Math.max(0, stats.z),
         sectorsActive,
         Math.abs(env[0]),
-        Math.abs(env[1]) / 10,
+        Math.abs(env[1]),
         load / 1000,
       ],
     };
@@ -341,7 +373,12 @@ export function computeAlerts(reports, options = {}) {
     const cityCorridors = corridors.filter(([from]) => from === location);
     const load = cityCorridors.reduce((total, route) => total + route[2], 0);
     const env = envByCity[location] ?? [0, 0];
-    const envOdd = Math.abs(env[0]) >= 3 || Math.abs(env[1]) >= 40;
+    const weather = weatherStats(reports, location, now);
+    const actualWeather = weather.temperature.observations || weather.precipitation.observations;
+    const weatherValues = actualWeather ? [weather.temperature.anomaly, weather.precipitation.anomaly] : env;
+    const envOdd = actualWeather
+      ? Math.abs(weatherValues[0]) >= 2 || Math.abs(weatherValues[1]) >= 2
+      : Math.abs(weatherValues[0]) >= 3 || Math.abs(weatherValues[1]) >= 40;
     const confidence = anomalyConfidence(stats, up, envOdd, load, mlScore);
     const risk = Math.min(
       99,
@@ -372,6 +409,7 @@ export function computeAlerts(reports, options = {}) {
       load,
       corridorLoad: load,
       envOdd,
+      weatherAnomaly: actualWeather ? { temperature: weatherValues[0], precipitation: weatherValues[1] } : null,
       confidence,
       drivers,
       risk,
@@ -394,4 +432,18 @@ export function computeAlerts(reports, options = {}) {
   }
 
   return alerts.sort((a, b) => b.risk - a.risk);
+}
+
+export function alertDiagnostics(reports, options = {}) {
+  const now = options.now ?? new Date();
+  const cities = buildCityBuckets(reports, now);
+  if (!Object.keys(cities).length) return [{ code: 'no_data', message: 'No dated records are available in the selected dataset.' }];
+  return Object.entries(cities).map(([location, city]) => {
+    const stats = cityStatsFromSeries(city.all);
+    const baselineDays = stats.series.slice(0, 23).filter((value) => value > 0).length;
+    if (baselineDays < 5) return { location, code: 'insufficient_baseline', message: `${location}: no alert generated because baseline coverage is ${baselineDays}/23 days; at least 5 baseline days are required.` };
+    if (stats.recentTotal < ALERT_RULES.minRecent) return { location, code: 'below_volume', message: `${location}: no alert generated because recent disease activity is ${stats.recentTotal}, below the ${ALERT_RULES.minRecent} minimum.` };
+    if (stats.ratio < ALERT_RULES.minRatio || stats.z < ALERT_RULES.minZ) return { location, code: 'below_statistical_threshold', message: `${location}: no alert generated because the ratio (${stats.ratio.toFixed(1)}x) and z-score (${stats.z.toFixed(1)}) do not meet the preserved thresholds.` };
+    return { location, code: 'thresholds_not_crossed', message: `${location}: no alert generated because the preserved rule and ML thresholds were not crossed.` };
+  });
 }

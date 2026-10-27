@@ -466,9 +466,10 @@ function detectSector(row, sectorIndex, diseaseText, sourceDataset = '') {
 }
 
 function parseCases(value) {
-  const number = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(number) || number <= 0) return null;
-  return Math.max(1, Math.min(1000000000, Math.round(number)));
+  const raw = String(value ?? '').trim();
+  const number = Number(raw.replace(/[^0-9.-]/g, ''));
+  if (!Number.isFinite(number) || number < 0) return null;
+  return Math.min(1000000000, Math.round(number));
 }
 
 function parseOptionalCount(value) {
@@ -623,7 +624,10 @@ function parseUploadedCsv(text) {
     const rowDay = date ? new Date(date).setHours(0, 0, 0, 0) : null;
     const day = rowDay && latestDay ? Math.max(0, Math.round((latestDay - rowDay) / 864e5)) : index % 30;
 
-    if (!cases || !date) { skipped += 1; return; }
+    const temperature = parseMeasurement(readCell(row, temperatureIndex));
+    const precipitation = parseMeasurement(readCell(row, precipitationIndex));
+    const hasClimateObservation = sector === 'environment' && (Number.isFinite(temperature) || Number.isFinite(precipitation));
+    if (cases === null || (cases === 0 && !hasClimateObservation) || !date) { skipped += 1; return; }
     reports.push(decorateUiReport({
       id: index + 1,
       day,
@@ -641,8 +645,8 @@ function parseUploadedCsv(text) {
       symptoms: cleanOptional(readCell(row, symptomsIndex)) || undefined,
       mortality,
       deaths: mortality,
-      temperatureCelsius: parseMeasurement(readCell(row, temperatureIndex)),
-      precipitationMm: parseMeasurement(readCell(row, precipitationIndex)),
+      temperatureCelsius: temperature,
+      precipitationMm: precipitation,
       sourceDataset: cleanOptional(sourceDataset) || undefined,
       sourceUrl: cleanOptional(readCell(row, sourceUrlIndex)) || undefined,
       isSynthetic: /^(true|1|yes)$/i.test(readCell(row, syntheticIndex)),
@@ -1544,11 +1548,12 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
     farmId: '',
     block: '',
   });
+  const [showAllReports, setShowAllReports] = useState(false);
 
-  const rows = reports
+  const filteredRows = reports
     .filter((row) => (filters.sec === 'all' || row.sec === filters.sec) && (filters.loc === 'all' || row.loc === filters.loc || row.district === filters.loc))
-    .sort((a, b) => a.day - b.day || b.id - a.id)
-    .slice(0, 40);
+    .sort((a, b) => a.day - b.day || b.id - a.id);
+  const rows = showAllReports ? filteredRows : filteredRows.slice(0, 10);
   const canWrite = !live || can(auth, 'reports:write');
 
   const updateForm = (patch) => {
@@ -1764,6 +1769,13 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
           </tbody>
         </table>
       </div>
+      {filteredRows.length > 10 ? (
+        <div className="mt-3 flex justify-center">
+          <Button variant="ghost" className="px-4 py-2" onClick={() => setShowAllReports((current) => !current)}>
+            {showAllReports ? 'Show less' : `See more (${filteredRows.length - 10} more)`}
+          </Button>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1825,7 +1837,7 @@ function DetectionChart({ reports, location }) {
   );
 }
 
-function AlertsPage({ reports, alerts, activeCity, setActiveCity, auth, onValidate, onRespond, envByCity }) {
+function AlertsPage({ reports, alerts, diagnostics, activeCity, setActiveCity, auth, onValidate, onRespond, envByCity }) {
   const cityOptions = getReportLocations(reports);
   const city = activeCity || alerts[0]?.loc || cityOptions[0] || LOCATIONS[0][0];
 
@@ -1835,6 +1847,15 @@ function AlertsPage({ reports, alerts, activeCity, setActiveCity, auth, onValida
         A city is flagged when its weekly reports run at least 1.8x the usual level and cross the alert line. The anomaly engine combines z-score,
         cross-sector rise, unusual weather and movement routes. These are signals to investigate, not confirmed outbreaks.
       </Top>
+
+      {!alerts.length && diagnostics?.length ? (
+        <div className="mb-5 rounded-tool border border-animal/40 bg-card p-4 text-sm text-ink">
+          <b className="font-display">Why no alert was generated</b>
+          <ul className="mt-2 list-disc pl-5 text-mute">
+            {diagnostics.slice(0, 6).map((item) => <li key={`${item.location || 'dataset'}-${item.code}`}>{item.message}</li>)}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] xl:gap-11">
         <div>
@@ -2285,12 +2306,14 @@ function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
   const [manualValidations, setManualValidations] = useState({});
+  const [alertDiagnostics, setAlertDiagnostics] = useState([]);
+  const [serverAlerts, setServerAlerts] = useState([]);
   const csvUploadToken = useRef(0);
   const datasetReports = reports;
   const analysisReports = useMemo(() => periodizeReports(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
   const periodLabel = useMemo(() => periodText(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
   const uploadedDataset = datasetReports.some((row) => row.sourceType === 'csv' || row.sourceType === 'csv_browser');
-  const rawAlerts = useMemo(() => uploadedDataset ? [] : computeAlerts(analysisReports, weatherByCity), [analysisReports, uploadedDataset, weatherByCity]);
+  const rawAlerts = useMemo(() => uploadedDataset ? serverAlerts : computeAlerts(analysisReports, weatherByCity), [analysisReports, uploadedDataset, serverAlerts, weatherByCity]);
   const alerts = useMemo(
     () =>
       rawAlerts.map((alert) => {
@@ -2352,15 +2375,19 @@ function App() {
     if (token) fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
   };
 
-  const loadServerAlertContext = async (tokenAtStart) => {
+  const loadServerAlertContext = async (tokenAtStart, datasetId = activeDatasetId) => {
     try {
-      const response = await fetch('/api/alerts', { headers: { Authorization: `Bearer ${auth?.token}` } });
+      const query = datasetId ? `?datasetId=${encodeURIComponent(datasetId)}` : '';
+      const response = await fetch(`/api/alerts${query}`, { headers: { Authorization: `Bearer ${auth?.token}` } });
       if (response.status === 401) {
         logout();
         return;
       }
       if (!response.ok || tokenAtStart !== csvUploadToken.current) return;
-      const serverAlerts = await response.json();
+      const payload = await response.json();
+      const serverAlerts = Array.isArray(payload) ? payload : payload.alerts || [];
+      setServerAlerts(serverAlerts);
+      setAlertDiagnostics(Array.isArray(payload) ? [] : payload.diagnostics || []);
       const nextValidations = Object.fromEntries(
         serverAlerts
           .filter((alert) => alert.manualValidation)
@@ -2558,10 +2585,12 @@ function App() {
         setUploadInfo(datasetId && selectedDataset ? { name: selectedDataset.fileName, rows: selectedDataset.importedRows ?? selectedDataset.rowCount, skipped: selectedDataset.skippedRows ?? 0, saved: true, datasetId } : null);
         setPeriodEnd(latestReportDate(nextReports));
         if (datasetId) setPeriodDays('all');
-        loadServerAlertContext(tokenAtStart);
+        loadServerAlertContext(tokenAtStart, datasetId);
         loadWeatherContext(nextReports, tokenAtStart);
       } else {
         setManualValidations({});
+        setServerAlerts([]);
+        setAlertDiagnostics([]);
       }
     } catch {
       setLive(false);
@@ -2577,6 +2606,8 @@ function App() {
     setSelectedLocation(null);
     setActiveCity(null);
     setManualValidations({});
+    setServerAlerts([]);
+    setAlertDiagnostics([]);
   };
 
   const handleCsvUpload = async (event) => {
@@ -2723,6 +2754,7 @@ function App() {
       <Dashboard
         reports={analysisReports}
         alerts={alerts}
+        diagnostics={alertDiagnostics}
         setPage={setPage}
         layers={layers}
         setLayers={setLayers}
