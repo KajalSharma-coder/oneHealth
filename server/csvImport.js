@@ -178,7 +178,7 @@ async function parseReportCsvBuffer(buffer) {
 
   const keys = [...new Set(rows.flatMap((row) => Object.keys(row)))];
   const headerError = validateHeaders(keys);
-  if (headerError) return { reports: [], skipped: rows.length, error: headerError };
+  if (headerError) return { reports: [], skipped: rows.length, headers: keys, error: headerError };
 
   const locationKeys = findKeys(keys, CSV_HEADERS.location);
   const diseaseKey = findKey(keys, CSV_HEADERS.signal);
@@ -263,8 +263,8 @@ async function parseReportCsvBuffer(buffer) {
     });
   });
 
-  if (!reports.length) return { reports, skipped, error: 'No valid report rows found in this CSV.' };
-  return { reports, skipped: skipped + Math.max(0, rows.length - MAX_ROWS) };
+  if (!reports.length) return { reports, skipped, headers: keys, error: 'No valid report rows found in this CSV.' };
+  return { reports, skipped: skipped + Math.max(0, rows.length - MAX_ROWS), headers: keys };
 }
 
 module.exports = { parseReportCsvBuffer };

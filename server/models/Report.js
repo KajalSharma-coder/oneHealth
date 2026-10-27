@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 module.exports = mongoose.model('Report', new mongoose.Schema({
   datasetId: { type: String, index: true },
+  recordFingerprint: { type: String, index: true },
   disease:  { type: String, required: true, trim: true },
   sector:   { type: String, required: true, enum: ['human', 'animal', 'environment', 'unknown'] },
   location: { type: String, required: true, trim: true },

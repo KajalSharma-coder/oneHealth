@@ -8,6 +8,18 @@
 
 OneHealth is a React and Express dashboard for viewing human-health, animal-health, and environmental reports in one operational view. It presents reports on an interactive map, summarizes activity by sector and location, calculates early-warning signals, supports CSV ingestion, records manual reports, and gives authorized users tools for alert validation, field-response tracking, user administration, audit review, and data-quality review.
 
+## Enhancement update (2026-10-28)
+
+- The default `datasetId=all` scope combines every ready persisted dataset, preserves each report's dataset/source provenance, and keeps browser-only CSV uploads local to that browser.
+- CSV imports now persist uploader and synthetic-data metadata, calculate row fingerprints, skip duplicate records within an upload, and expose rejected/skipped counts.
+- Environment measurements are retained as climate context and are excluded from disease-volume baselines; the detector does not infer causality from climate alone.
+- Alert lifecycle operations support `new`, `acknowledged`, `investigating`, `resolved`, and `dismissed`, with actor/timestamp/note history and compatibility for legacy validation labels.
+- Filtered CSV and dependency-free PDF exports are available at `GET /api/reports/export.csv` and `GET /api/reports/export.pdf`; both require `reports:read` and include source/dataset fields.
+- Admins can remove a persisted dataset with `DELETE /api/reports/datasets/:datasetId`; viewers receive 403 for this and all other write operations through backend permission middleware.
+- The map includes date range, sector, disease, location, severity, and minimum-volume filters and only maps records with valid coordinates or known location coordinates.
+
+Known limitations: PDF export is a compact text report rather than a chart-rich publication; forecast modeling is not enabled, so alerts are observed anomaly signals only. MongoDB remains required for global persistence, and browser-only uploads are intentionally not shared across users.
+
 The repository identifies the product as **One Health Dashboard** and describes it as an Impact Hackathon Track 05 project. The implementation is a working web application, but several values used for the demonstration are intentionally sample or heuristic data.
 
 ### Problem addressed

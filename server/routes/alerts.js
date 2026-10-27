@@ -21,8 +21,9 @@ const analysisWindow = async (datasetId) => {
 };
 const cleanLocation = (value) => String(value || '').trim().slice(0, 80);
 const cleanNote = (value) => String(value || '').trim().slice(0, 240);
-const VALID_STATUSES = new Set(['validated', 'review', 'dismissed']);
+const VALID_STATUSES = new Set(['new', 'acknowledged', 'investigating', 'resolved', 'dismissed', 'validated', 'review']);
 const RESPONSE_STATUSES = new Set(['new', 'investigating', 'sample_collected', 'contained', 'resolved']);
+const STATUS_COMPATIBILITY = { validated: 'acknowledged', review: 'investigating' };
 
 const publicValidation = (validation) => validation && ({
   status: validation.status,
@@ -32,6 +33,8 @@ const publicValidation = (validation) => validation && ({
   role: validation.role,
   at: validation.at instanceof Date ? validation.at.toISOString() : validation.at,
   responseUpdatedAt: validation.responseUpdatedAt instanceof Date ? validation.responseUpdatedAt.toISOString() : validation.responseUpdatedAt,
+  lifecycleStatus: STATUS_COMPATIBILITY[validation.status] || validation.status || 'new',
+  history: (validation.history || []).map((entry) => ({ ...entry, at: entry.at instanceof Date ? entry.at.toISOString() : entry.at })),
 });
 
 const attachManualValidation = async (alerts) => {
@@ -75,15 +78,18 @@ router.post('/alerts/:location/validate', requirePermission('alerts:validate'), 
   if (!location) return res.status(400).json({ error: 'location is required' });
   if (!VALID_STATUSES.has(status)) return res.status(400).json({ error: 'status must be validated, review or dismissed' });
 
+  const lifecycleStatus = STATUS_COMPATIBILITY[status] || status;
+  const now = new Date();
   const validation = await AlertValidation.findOneAndUpdate(
     { location },
     {
       location,
-      status,
+      status: lifecycleStatus,
       note: cleanNote(req.body.note),
       by: req.user.username,
       role: req.user.role,
-      at: new Date(),
+      at: now,
+      $push: { history: { status: lifecycleStatus, by: req.user.username, role: req.user.role, at: now, note: cleanNote(req.body.note) } },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
@@ -93,6 +99,34 @@ router.post('/alerts/:location/validate', requirePermission('alerts:validate'), 
     notePresent: Boolean(validation.note),
   }, req);
   res.json({ location, manualValidation: publicValidation(validation) });
+});
+
+// POST /api/alerts/:location/status { status, note? }
+router.post('/alerts/:location/status', requirePermission('alerts:validate'), async (req, res) => {
+  const location = cleanLocation(req.params.location);
+  const status = cleanLocation(req.body.status).toLowerCase();
+  if (!location) return res.status(400).json({ error: 'location is required' });
+  if (!new Set(['new', 'acknowledged', 'investigating', 'resolved', 'dismissed']).has(status)) {
+    return res.status(400).json({ error: 'status must be new, acknowledged, investigating, resolved or dismissed' });
+  }
+  const now = new Date();
+  const validation = await AlertValidation.findOneAndUpdate(
+    { location },
+    {
+      $set: { location, status, note: cleanNote(req.body.note), by: req.user.username, role: req.user.role, at: now },
+      $push: { history: { status, by: req.user.username, role: req.user.role, at: now, note: cleanNote(req.body.note) } },
+      $setOnInsert: { responseStatus: 'new' },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  await writeAudit('alert.status.updated', req.user, { location, status }, req);
+  return res.json({ location, manualValidation: publicValidation(validation) });
+});
+
+router.get('/alerts/:location/history', requirePermission('alerts:read'), async (req, res) => {
+  const location = cleanLocation(req.params.location);
+  const validation = await AlertValidation.findOne({ location }).lean();
+  return res.json({ location, history: validation?.history || [] });
 });
 
 // POST /api/alerts/:location/respond  { responseStatus, note? }

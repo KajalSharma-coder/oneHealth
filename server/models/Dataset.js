@@ -5,6 +5,8 @@ const datasetSchema = new mongoose.Schema({
   fileName: { type: String, required: true, trim: true, maxlength: 255 },
   contentHash: { type: String, required: true, unique: true, index: true },
   sourceDataset: { type: String, trim: true, maxlength: 120 },
+  uploadedBy: { type: String, trim: true, maxlength: 80, index: true },
+  isSynthetic: { type: Boolean, default: false },
   status: { type: String, enum: ['importing', 'ready', 'failed'], required: true, default: 'importing', index: true },
   importedAt: { type: Date, default: Date.now, index: true },
   rowCount: { type: Number, default: 0 },
@@ -14,6 +16,7 @@ const datasetSchema = new mongoose.Schema({
   dateMin: Date,
   dateMax: Date,
   headers: [{ type: String, trim: true }],
+  validationErrors: [{ type: String, trim: true, maxlength: 500 }],
   error: { type: String, trim: true, maxlength: 500 },
 }, { timestamps: true });
 

@@ -116,6 +116,13 @@ test('climate-only observations affect weather features but cannot create diseas
   assert.match(alertDiagnostics(reports, { now: NOW })[0].message, /baseline coverage|recent disease activity/);
 });
 
+test('environment rows with numeric measurements never count as disease cases', () => {
+  const rows = [];
+  for (let day = 7; day < 30; day += 1) rows.push({ location: 'Delhi', sector: 'environment', disease: 'Rainfall', cases: 20, temperatureCelsius: 20, date: new Date(NOW.getTime() - day * DAY) });
+  for (let day = 0; day < 7; day += 1) rows.push({ location: 'Delhi', sector: 'environment', disease: 'Rainfall', cases: 200, temperatureCelsius: 35, date: new Date(NOW.getTime() - day * DAY) });
+  assert.deepEqual(computeAlerts(rows, { now: NOW }), []);
+});
+
 test('combined reports from multiple dataset uploads produce one shared alert scope', () => {
   const reports = [];
   for (let day = 7; day < 30; day += 1) reports.push({ datasetId: 'admin-a', ...datedReport({ day, cases: 1 }) });

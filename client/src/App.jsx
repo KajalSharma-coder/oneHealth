@@ -967,8 +967,8 @@ function Top({ title, children, action }) {
 }
 
 function validationClass(status) {
-  if (status === 'validated') return 'border-env text-env';
-  if (status === 'review') return 'border-animal text-animal';
+  if (['acknowledged', 'resolved', 'validated'].includes(status)) return 'border-env text-env';
+  if (['investigating', 'review'].includes(status)) return 'border-animal text-animal';
   return 'border-alert text-alert';
 }
 
@@ -1039,8 +1039,8 @@ function ValidationPanel({ alert, auth, onValidate, onRespond }) {
       {can(auth, 'alerts:validate') ? (
         <>
           <div className="mt-3 flex flex-wrap gap-2">
-            {['validated', 'review', 'dismissed'].map((status) => (
-              <Button key={status} variant={status === 'validated' ? 'solid' : 'ghost'} className="px-3 py-1.5" onClick={() => onValidate(alert.loc, status)}>
+            {['new', 'acknowledged', 'investigating', 'resolved', 'dismissed'].map((status) => (
+              <Button key={status} variant={status === 'acknowledged' ? 'solid' : 'ghost'} className="px-3 py-1.5" onClick={() => onValidate(alert.loc, status)}>
                 Mark {status}
               </Button>
             ))}
@@ -1094,11 +1094,12 @@ function LeafletDiseaseMap({ reports, alerts, layers, mapFilters, selectedLocati
     () =>
       getReportLocations(reports)
         .map((loc) => {
-          const sample = reports.find((row) => row.loc === loc && getReportCoords(row));
+          const locationRows = reports.filter((row) => row.loc === loc && (!mapFilters.disease || mapFilters.disease === 'all' || row.dis === mapFilters.disease) && (!mapFilters.location || mapFilters.location === 'all' || row.loc === mapFilters.location));
+          const sample = locationRows.find((row) => getReportCoords(row));
           const coords = sample ? getReportCoords(sample) : getKnownCoords(loc);
           if (!coords) return null;
           const alert = alertByCity[loc];
-          const count = reports.filter((row) => row.loc === loc && (mapFilters.sector === 'all' || row.sec === mapFilters.sector)).length;
+          const count = locationRows.filter((row) => mapFilters.sector === 'all' || row.sec === mapFilters.sector).length;
           if (count < mapFilters.minCases) return null;
           if (mapFilters.severity === 'alerts' && !alert) return null;
           if (mapFilters.severity === 'high' && alert?.severity !== 'high') return null;
@@ -1204,17 +1205,20 @@ function LeafletDiseaseMap({ reports, alerts, layers, mapFilters, selectedLocati
 
 function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilters, selectedLocation, setSelectedLocation }) {
   const alertByCity = Object.fromEntries(alerts.map((alert) => [alert.loc, alert]));
-  const weekForCity = (loc) => reports.filter((row) => row.loc === loc && (mapFilters.sector === 'all' || row.sec === mapFilters.sector));
+  const latest = latestReportDate(reports) || new Date();
+  const dateFilteredReports = reports.filter((row) => mapFilters.dateRange === 'all' || (recordDate(row) && (latest - recordDate(row)) / 864e5 < Number(mapFilters.dateRange)));
+  const filteredReports = dateFilteredReports.filter((row) => (mapFilters.disease === 'all' || row.dis === mapFilters.disease) && (mapFilters.location === 'all' || row.loc === mapFilters.location));
+  const weekForCity = (loc) => filteredReports.filter((row) => row.loc === loc && (mapFilters.sector === 'all' || row.sec === mapFilters.sector));
   const selectedWeek = selectedLocation ? weekForCity(selectedLocation) : [];
   const selectedAlert = selectedLocation ? alertByCity[selectedLocation] : null;
-  const selectedSample = selectedLocation ? reports.find((row) => row.loc === selectedLocation) : null;
+  const selectedSample = selectedLocation ? filteredReports.find((row) => row.loc === selectedLocation) : null;
   const selectedEnv = selectedLocation
     ? [selectedSample?.temperatureCelsius ?? ENV[selectedLocation]?.[0] ?? 0, selectedSample?.precipitationMm ?? ENV[selectedLocation]?.[1] ?? 0]
     : [0, 0];
-  const mappedLocations = getReportLocations(reports).filter((loc) => {
+  const mappedLocations = getReportLocations(filteredReports).filter((loc) => {
     const weeklyCount = total(weekForCity(loc));
     const alert = alertByCity[loc];
-    if (!reports.some((row) => row.loc === loc && getReportCoords(row))) return false;
+    if (!filteredReports.some((row) => row.loc === loc && getReportCoords(row))) return false;
     if (weeklyCount < mapFilters.minCases) return false;
     if (mapFilters.severity === 'alerts' && !alert) return false;
     if (mapFilters.severity === 'high' && alert?.severity !== 'high') return false;
@@ -1243,7 +1247,13 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
           </button>
         ))}
       </div>
-      <div className="mb-3 grid gap-2 text-[13px] sm:grid-cols-3">
+      <div className="mb-3 grid gap-2 text-[13px] sm:grid-cols-3 lg:grid-cols-5">
+        <label className="grid gap-1 text-[#9fb2c8]">
+          Date range
+          <select className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.dateRange} onChange={(event) => updateMapFilter({ dateRange: event.target.value })}>
+            <option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All available dates</option>
+          </select>
+        </label>
         <label className="grid gap-1 text-[#9fb2c8]">
           Sector
           <select
@@ -1257,6 +1267,20 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
                 {label}
               </option>
             ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-[#9fb2c8]">
+          Disease
+          <select className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.disease} onChange={(event) => updateMapFilter({ disease: event.target.value })}>
+            <option value="all">All diseases/signals</option>
+            {[...new Set(reports.map((row) => row.dis).filter(Boolean))].sort().map((disease) => <option key={disease} value={disease}>{disease}</option>)}
+          </select>
+        </label>
+        <label className="grid gap-1 text-[#9fb2c8]">
+          Location
+          <select className="rounded-[10px] border border-[#2b4161] bg-[#0d1b2b] px-2.5 py-2 text-[#dbe6f2]" value={mapFilters.location} onChange={(event) => updateMapFilter({ location: event.target.value })}>
+            <option value="all">All locations</option>
+            {getReportLocations(reports).map((location) => <option key={location} value={location}>{location}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-[#9fb2c8]">
@@ -1285,7 +1309,7 @@ function MapPanel({ reports, alerts, layers, setLayers, mapFilters, setMapFilter
 
       <div className="grid flex-1 items-stretch gap-3 lg:grid-cols-[minmax(0,1fr)_190px]">
         <LeafletDiseaseMap
-          reports={reports}
+          reports={filteredReports}
           alerts={alerts}
           layers={layers}
           mapFilters={mapFilters}
@@ -1625,6 +1649,20 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
     .sort((a, b) => a.day - b.day || b.id - a.id);
   const rows = showAllReports ? filteredRows : filteredRows.slice(0, 10);
   const canWrite = can(auth, 'reports:write');
+  const exportReport = async (format) => {
+    if (!live) { showToast('Exports require database-backed reports'); return; }
+    const query = new URLSearchParams({ datasetId: window.localStorage.getItem('onehealth-dataset-id') || 'all' });
+    if (filters.sec !== 'all') query.set('sector', filters.sec);
+    if (filters.loc !== 'all') query.set('location', filters.loc);
+    const response = await fetch(`/api/reports/export.${format}?${query}`, { headers: { Authorization: `Bearer ${auth?.token}` } });
+    if (!response.ok) { showToast('Export could not be created'); return; }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `onehealth-report-export.${format}`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
 
   const updateForm = (patch) => {
     setForm((current) => {
@@ -1706,7 +1744,7 @@ function ReportsPage({ reports, setReports, filters, setFilters, live, reload, s
 
   return (
     <>
-      <Top title="Reports">Add an observation or filter what has been filed</Top>
+      <Top title="Reports" action={<div className="flex flex-wrap gap-2"><Button variant="ghost" className="px-3 py-1.5" onClick={() => exportReport('csv')}>Export CSV</Button><Button variant="ghost" className="px-3 py-1.5" onClick={() => exportReport('pdf')}>Export PDF</Button></div>}>Add an observation or filter what has been filed</Top>
 
       {canWrite ? <section className="mb-4 rounded-tool border border-line bg-card p-4">
         <h3 className="font-display text-lg font-bold">New report</h3>
@@ -2369,7 +2407,7 @@ function App() {
   const [empty, setEmpty] = useState(false);
   const [filters, setFilters] = useState({ sec: 'all', loc: 'all' });
   const [layers, setLayers] = useState({ heat: true, corridors: true });
-  const [mapFilters, setMapFilters] = useState({ sector: 'all', severity: 'all', minCases: 0 });
+  const [mapFilters, setMapFilters] = useState({ sector: 'all', severity: 'all', minCases: 0, dateRange: '7', disease: 'all', location: 'all' });
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [activeCity, setActiveCity] = useState(null);
   const [toast, setToast] = useState('');
@@ -2526,7 +2564,7 @@ function App() {
 
     if (live) {
       try {
-        const response = await fetch(`/api/alerts/${encodeURIComponent(location)}/validate`, {
+        const response = await fetch(`/api/alerts/${encodeURIComponent(location)}/status`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth.token}` },
           body: JSON.stringify({ status }),

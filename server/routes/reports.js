@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const multer = require('multer');
+const crypto = require('crypto');
 const Report = require('../models/Report');
 const Dataset = require('../models/Dataset');
 const { datasetIdForBuffer, legacyDatasetId } = require('../datasetIdentity');
@@ -58,6 +59,12 @@ const cleanDate = (value) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
 };
+const recordFingerprint = (report) => crypto.createHash('sha256').update([
+  report.date?.toISOString?.() || report.date || '', report.location, report.sector,
+  report.disease, report.cases, report.latitude ?? '', report.longitude ?? '',
+  report.species ?? '', report.sourceDataset ?? '', report.temperatureCelsius ?? '', report.precipitationMm ?? '',
+].join('|')).digest('hex');
+const csvEscape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 // GET /api/reports/datasets
 router.get('/datasets', requirePermission('reports:read'), async (req, res) => {
   try {
@@ -90,6 +97,21 @@ router.get('/datasets', requirePermission('reports:read'), async (req, res) => {
   }
 });
 
+// Dataset operations are restricted to admins, while dataset contents remain
+// readable by every authorized viewer through the shared scope.
+router.delete('/datasets/:datasetId', requirePermission('users:manage'), async (req, res) => {
+  const datasetId = String(req.params.datasetId || '');
+  if (!datasetId || datasetId === ALL_DATASETS || datasetId.startsWith('legacy:')) {
+    return res.status(400).json({ error: 'Only persisted dataset IDs can be deleted.' });
+  }
+  const dataset = await Dataset.findOne({ datasetId });
+  if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+  await Report.deleteMany({ datasetId });
+  await Dataset.deleteOne({ datasetId });
+  await writeAudit('reports.dataset.deleted', req.user, { datasetId, fileName: dataset.fileName }, req);
+  return res.status(204).end();
+});
+
 // GET /api/reports?datasetId=<id>&sector=human&location=Jaipur&limit=50
 router.get('/', requirePermission('reports:read'), async (req, res) => {
   try {
@@ -112,6 +134,53 @@ router.get('/', requirePermission('reports:read'), async (req, res) => {
     res.json(await Report.find(filter).sort({ date: -1 }).limit(limit));
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// GET /api/reports/export.csv?datasetId=all&sector=human&location=Delhi
+router.get('/export.csv', requirePermission('reports:read'), async (req, res) => {
+  try {
+    const datasetId = req.query.datasetId ? String(req.query.datasetId) : ALL_DATASETS;
+    const filter = isAllDatasets(datasetId)
+      ? sharedReportFilter(await Dataset.find({ status: 'ready' }).distinct('datasetId'))
+      : datasetFilter(datasetId);
+    if (req.query.sector) filter.sector = cleanText(req.query.sector);
+    if (req.query.location) filter.location = cleanText(req.query.location);
+    const rows = await Report.find(filter).sort({ date: -1 }).limit(50000).lean();
+    const headers = ['date', 'location', 'state', 'district', 'sector', 'disease', 'cases', 'latitude', 'longitude', 'temperatureCelsius', 'precipitationMm', 'datasetId', 'sourceType', 'sourceName', 'sourceUploadedBy', 'sourceUploadedAt', 'isSynthetic', 'dataQualityScore'];
+    const body = rows.map((row) => headers.map((header) => csvEscape(row[header] instanceof Date ? row[header].toISOString() : row[header])).join(','));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="onehealth-report-export.csv"');
+    return res.send([headers.join(','), ...body].join('\n'));
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
+
+// A dependency-free, printable PDF export. It intentionally contains only
+// filtered provenance rows, making the output auditable and deterministic.
+router.get('/export.pdf', requirePermission('reports:read'), async (req, res) => {
+  try {
+    const datasetId = req.query.datasetId ? String(req.query.datasetId) : ALL_DATASETS;
+    const filter = isAllDatasets(datasetId)
+      ? sharedReportFilter(await Dataset.find({ status: 'ready' }).distinct('datasetId'))
+      : datasetFilter(datasetId);
+    if (req.query.sector) filter.sector = cleanText(req.query.sector);
+    if (req.query.location) filter.location = cleanText(req.query.location);
+    const rows = await Report.find(filter).sort({ date: -1 }).limit(50000).lean();
+    const lines = ['OneHealth report export', `Generated: ${new Date().toISOString()}`, `Rows: ${rows.length}`, ''];
+    rows.slice(0, 120).forEach((row) => lines.push(`${row.date ? new Date(row.date).toISOString().slice(0, 10) : '-'} | ${row.location || '-'} | ${row.sector || '-'} | ${row.disease || '-'} | cases ${row.cases ?? 0} | dataset ${row.datasetId || 'legacy'} | source ${row.sourceName || '-'}`));
+    const escapePdf = (value) => String(value).replace(/([\\()])/g, '\\$1').replace(/[^\x20-\x7e]/g, ' ');
+    const stream = `BT\n/F1 8 Tf\n40 800 Td\n${lines.map((line, index) => `${index ? '0 -11 Td\n' : ''}(${escapePdf(line.slice(0, 150))}) Tj`).join('\n')}\nET`;
+    const objects = [`<< /Type /Catalog /Pages 2 0 R >>`, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`, `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`, `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`];
+    let pdf = '%PDF-1.4\n'; const offsets = [0];
+    objects.forEach((object, index) => { offsets[index + 1] = Buffer.byteLength(pdf); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+    const xref = Buffer.byteLength(pdf); pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n `).join('\n')}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="onehealth-report-export.pdf"');
+    return res.send(Buffer.from(pdf));
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
   }
 });
 
@@ -155,16 +224,26 @@ router.post('/import-csv', requirePermission('reports:write'), handleCsvUpload, 
     const datasetId = datasetIdForBuffer(req.file.buffer);
     const dateMin = parsed.reports.reduce((min, report) => (!min || report.date < min ? report.date : min), null);
     const dateMax = parsed.reports.reduce((max, report) => (!max || report.date > max ? report.date : max), null);
-    const sourceDataset = parsed.reports.find((report) => report.sourceDataset)?.sourceDataset;
+    const uniqueReports = [];
+    const seenFingerprints = new Set();
+    for (const report of parsed.reports) {
+      const fingerprint = recordFingerprint(report);
+      if (seenFingerprints.has(fingerprint)) continue;
+      seenFingerprints.add(fingerprint);
+      uniqueReports.push({ ...report, recordFingerprint: fingerprint });
+    }
+    const duplicateRows = parsed.reports.length - uniqueReports.length;
+    const sourceDataset = uniqueReports.find((report) => report.sourceDataset)?.sourceDataset;
     dataset = await Dataset.findOneAndUpdate(
       { datasetId },
-      { datasetId, fileName: req.file.originalname, contentHash: datasetId, sourceDataset, status: 'importing', importedAt: new Date(), rowCount: parsed.reports.length + parsed.skipped, skippedRows: parsed.skipped, dateMin, dateMax, error: undefined },
+      { datasetId, fileName: req.file.originalname, contentHash: datasetId, sourceDataset, uploadedBy: req.user.username, isSynthetic: uniqueReports.length > 0 && uniqueReports.every((report) => report.isSynthetic === true), status: 'importing', importedAt: new Date(), rowCount: parsed.reports.length + parsed.skipped, skippedRows: parsed.skipped + duplicateRows, rejectedRows: duplicateRows, dateMin, dateMax, headers: parsed.headers || [], error: undefined, validationErrors: [] },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     if (parsed.error) {
       dataset.status = 'failed';
       dataset.error = parsed.error;
       dataset.rejectedRows = parsed.skipped;
+      dataset.validationErrors = [parsed.error];
       await dataset.save();
       return res.status(400).json({ ...parsed, datasetId });
     }
@@ -182,7 +261,7 @@ router.post('/import-csv', requirePermission('reports:write'), handleCsvUpload, 
       && (legacy.sourceDataset || '') === (sourceDataset || '')) {
       await Report.deleteMany({ datasetId: { $exists: false }, sourceType: 'csv', sourceName: req.file.originalname });
     }
-    const reports = parsed.reports.map((report) => withReportQuality(report, {
+    const reports = uniqueReports.map((report) => withReportQuality(report, {
       datasetId,
       sourceType: 'csv',
       sourceName: req.file.originalname,
@@ -192,17 +271,17 @@ router.post('/import-csv', requirePermission('reports:write'), handleCsvUpload, 
     const inserted = await Report.insertMany(reports, { ordered: false });
     dataset.status = 'ready';
     dataset.importedRows = inserted.length;
-    dataset.rejectedRows = parsed.reports.length - inserted.length;
+    dataset.rejectedRows = parsed.skipped + duplicateRows + (uniqueReports.length - inserted.length);
     await dataset.save();
     await writeAudit('reports.csv.imported', req.user, {
       fileName: req.file.originalname,
       inserted: inserted.length,
-      skipped: parsed.skipped,
+      skipped: parsed.skipped + duplicateRows,
     }, req);
 
     return res.status(201).json({
       inserted: inserted.length,
-      skipped: parsed.skipped,
+      skipped: parsed.skipped + duplicateRows,
       fileName: req.file.originalname,
       datasetId,
       status: dataset.status,

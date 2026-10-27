@@ -98,7 +98,8 @@ export function buildCityBuckets(reports, now = new Date()) {
     if (!location || !sector || day === null || day < 0 || day > 29) continue;
 
     const city = (cities[location] ??= { all: Array(30).fill(0), sector: {}, disease: {}, weather: { temperature: [], precipitation: [] } });
-    if (cases > 0) {
+    // Environment observations are context only, never disease activity.
+    if (cases > 0 && (sector === 'human' || sector === 'animal')) {
       city.all[day] += cases;
       (city.sector[sector] ??= Array(30).fill(0))[day] += cases;
       if (day < 7) city.disease[diseaseName(report)] = (city.disease[diseaseName(report)] || 0) + cases;
