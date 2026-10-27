@@ -20,6 +20,12 @@ OneHealth is a React and Express dashboard for viewing human-health, animal-heal
 
 Known limitations: PDF export is a compact text report rather than a chart-rich publication; forecast modeling is not enabled, so alerts are observed anomaly signals only. MongoDB remains required for global persistence, and browser-only uploads are intentionally not shared across users.
 
+## Vercel frontend deployment
+
+The Vite frontend can be deployed independently from the Render API. The deployment root is `client`, the build command is `npm run build`, and the output directory is `dist`. `client/vercel.json` rewrites `/api/*` to `https://onehealth-nmfa.onrender.com/api/*` and sends all other paths to `/index.html` for SPA refresh support.
+
+The frontend already uses relative `/api/...` requests, so no production API URL variable or frontend API-code change is required. In Render, add the final Vercel deployment origin to the existing `CORS_ORIGIN` value if the backend receives browser origin checks through the proxy; include the preview/custom frontend origins only when they are intended to be allowed. Do not expose MongoDB, auth secrets, or backend-only environment variables in Vercel.
+
 The repository identifies the product as **One Health Dashboard** and describes it as an Impact Hackathon Track 05 project. The implementation is a working web application, but several values used for the demonstration are intentionally sample or heuristic data.
 
 ### Problem addressed
