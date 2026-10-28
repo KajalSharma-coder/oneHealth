@@ -11,12 +11,19 @@ const DAY = 24 * 60 * 60 * 1000;
 const datasetFilter = (datasetId) => datasetId?.startsWith('legacy:')
   ? { datasetId: { $exists: false }, sourceName: decodeURIComponent(datasetId.slice('legacy:'.length)) }
   : { datasetId };
-const analysisWindow = async (datasetId) => {
+const analysisWindow = async (datasetId, mode = 'current') => {
   const scope = datasetId || ALL_DATASETS;
   const filter = isAllDatasets(scope)
     ? sharedReportFilter(await Dataset.find({ status: 'ready' }).distinct('datasetId'))
     : datasetFilter(scope);
   const rows = await Report.find(filter).lean();
+  if (mode === 'historical') {
+    const referenceDate = rows.reduce((max, row) => {
+      const date = new Date(row.date);
+      return !Number.isNaN(date.getTime()) && (!max || date > max) ? date : max;
+    }, null) || new Date();
+    return { reports: rows, referenceDate };
+  }
   return selectAnalysisWindow(rows, scope);
 };
 const cleanLocation = (value) => String(value || '').trim().slice(0, 80);
@@ -56,15 +63,19 @@ const attachManualValidation = async (alerts) => {
 router.get('/alerts', requirePermission('alerts:read'), async (req, res) => {
   try {
     const datasetId = req.query.datasetId ? String(req.query.datasetId) : ALL_DATASETS;
-    const { reports, referenceDate } = await analysisWindow(datasetId);
-    const alerts = await detect(reports, referenceDate);
-    const diagnostics = await detect.diagnostics(reports, referenceDate);
+    const mode = req.query.mode === 'historical' ? 'historical' : 'current';
+    const { reports, referenceDate } = await analysisWindow(datasetId, mode);
+    const historical = mode === 'historical' ? await detect.historical(reports) : null;
+    const alerts = historical ? historical.alerts : await detect(reports, referenceDate);
+    const diagnostics = historical ? historical.diagnostics : await detect.diagnostics(reports, referenceDate);
     return res.json({
       alerts: await attachManualValidation(alerts),
       diagnostics,
       datasetId: datasetId || null,
       referenceDate: referenceDate.toISOString(),
       analyzedRows: reports.length,
+      analysisMode: mode,
+      analyzedWindows: historical?.windows || 1,
     });
   } catch (error) {
     return res.status(400).json({ error: error.message });

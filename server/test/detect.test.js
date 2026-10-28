@@ -48,3 +48,24 @@ test('detect ignores future and older-than-window reports', async () => {
 
   assert.deepEqual(await detect(reports, NOW), []);
 });
+
+test('historical mode finds a verified anomaly relative to a historical dataset date', async () => {
+  const historicalNow = new Date('2025-12-31T00:00:00.000Z');
+  const reports = [];
+  for (let day = 7; day < 30; day += 1) reports.push({ ...report({ day }), date: new Date(historicalNow.getTime() - day * DAY) });
+  for (let day = 0; day < 7; day += 1) reports.push({ ...report({ day, cases: 3 }), date: new Date(historicalNow.getTime() - day * DAY) });
+  const result = await detect.historical(reports);
+  assert.ok(result.windows >= 1);
+  assert.ok(result.alerts.some((alert) => alert.analysisMode === 'historical' && alert.analysisDate));
+});
+
+test('historical mode can legitimately return no alerts', async () => {
+  const historicalNow = new Date('2025-12-31T00:00:00.000Z');
+  const reports = Array.from({ length: 30 }, (_, day) => ({
+    ...report({ day, location: 'Delhi', cases: 1 }),
+    date: new Date(historicalNow.getTime() - day * DAY),
+  }));
+  const result = await detect.historical(reports);
+  assert.deepEqual(result.alerts, []);
+  assert.ok(result.diagnostics.length > 0);
+});

@@ -43,6 +43,7 @@ const CSV_HEADERS = {
   sourceDataset: ['source_dataset'],
   sourceUrl: ['source_url', 'url'],
   synthetic: ['is_synthetic', 'synthetic'],
+  alertLabel: ['alert_label', 'alert', 'warning_label'],
 };
 
 const norm = (value) =>
@@ -201,6 +202,7 @@ async function parseReportCsvBuffer(buffer) {
   const sourceDatasetKey = findKey(keys, CSV_HEADERS.sourceDataset);
   const sourceUrlKey = findKey(keys, CSV_HEADERS.sourceUrl);
   const syntheticKey = findKey(keys, CSV_HEADERS.synthetic);
+  const alertLabelKey = findKey(keys, CSV_HEADERS.alertLabel);
   const stateKey = findKey(keys, ['state']);
   const districtKey = findKey(keys, ['district']);
 
@@ -259,6 +261,7 @@ async function parseReportCsvBuffer(buffer) {
       sourceDataset: sourceDataset || undefined,
       sourceUrl: cleanText(cell(row, sourceUrlKey), 500) || undefined,
       isSynthetic: /^(true|1|yes)$/i.test(cell(row, syntheticKey)),
+      ...(cleanText(cell(row, alertLabelKey), 80) ? { alertLabel: cleanText(cell(row, alertLabelKey), 80) } : {}),
       date,
     });
   });

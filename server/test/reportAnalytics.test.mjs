@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregateCasesBySector, aggregateDiseaseCases, calculateDashboardMetrics, filterReportsByPeriod } from '../../shared/reportAnalytics.mjs';
+import { aggregateCasesBySector, aggregateDiseaseCases, calculateDashboardMetrics, filterReportsByPeriod, periodAvailability } from '../../shared/reportAnalytics.mjs';
 
 test('period filtering uses record dates, excludes future rows, and aggregates cases by supported sector', () => {
   const rows = [
@@ -18,6 +18,13 @@ test('period filtering uses record dates, excludes future rows, and aggregates c
 test('all-period filtering preserves records with missing dates for legacy demo rows', () => {
   const selected = filterReportsByPeriod([{ day: 2, sector: 'human', cases: 2 }], '2021-01-10', 'all');
   assert.equal(selected.length, 1);
+});
+
+test('period availability explains an empty recent period for historical data', () => {
+  const status = periodAvailability([{ date: '2022-01-01', sector: 'human', cases: 2 }], '2025-12-31', 7);
+  assert.equal(status.empty, true);
+  assert.equal(status.hasHistoricalData, true);
+  assert.equal(status.earliest.toISOString(), '2022-01-01T00:00:00.000Z');
 });
 
 test('dashboard metrics distinguish cases, report rows, climate observations, and unavailable animal data', () => {

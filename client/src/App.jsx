@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import { ML_MODEL, cityStats, computeAlerts as computeSharedAlerts } from '../../shared/anomalyEngine.mjs';
-import { aggregateDiseaseCases, calculateDashboardMetrics, filterReportsByPeriod, recordDate } from '../../shared/reportAnalytics.mjs';
+import { aggregateDiseaseCases, calculateDashboardMetrics, filterReportsByPeriod, periodAvailability, recordDate } from '../../shared/reportAnalytics.mjs';
 
 const SECTORS = {
   human: 'Human',
@@ -591,6 +591,7 @@ const CSV_HEADERS = {
   sourceDataset: ['source_dataset'],
   sourceUrl: ['source_url', 'url'],
   synthetic: ['is_synthetic', 'synthetic'],
+  alertLabel: ['alert_label', 'alert', 'warning_label'],
 };
 
 function validateCsvHeaders({ locationColumns, diseaseIndex, sectorIndex, caseIndex, latIndex, lonIndex }) {
@@ -634,6 +635,7 @@ function parseUploadedCsv(text) {
   const sourceDatasetIndex = findColumn(headers, CSV_HEADERS.sourceDataset);
   const sourceUrlIndex = findColumn(headers, CSV_HEADERS.sourceUrl);
   const syntheticIndex = findColumn(headers, CSV_HEADERS.synthetic);
+  const alertLabelIndex = findColumn(headers, CSV_HEADERS.alertLabel);
   const headerError = validateCsvHeaders({ locationColumns, diseaseIndex, sectorIndex, caseIndex, latIndex, lonIndex });
   if (headerError) return { reports: [], skipped: body.length, error: headerError };
 
@@ -697,6 +699,7 @@ function parseUploadedCsv(text) {
       sourceDataset: cleanOptional(sourceDataset) || undefined,
       sourceUrl: cleanOptional(readCell(row, sourceUrlIndex)) || undefined,
       isSynthetic: /^(true|1|yes)$/i.test(readCell(row, syntheticIndex)),
+      alertLabel: cleanOptional(readCell(row, alertLabelIndex), 80) || undefined,
       vaccinationStatus: normEnum(readCell(row, vaccinationIndex), Object.keys(VACCINATION_OPTIONS), 'unknown'),
       confirmationStatus: normEnum(readCell(row, confirmationIndex), Object.keys(CONFIRMATION_OPTIONS), 'suspected'),
       farmId: cleanOptional(readCell(row, farmIndex)) || undefined,
@@ -1466,6 +1469,8 @@ function Dashboard({
   onCsvUpload,
   periodDays,
   setPeriodDays,
+  analysisMode,
+  setAnalysisMode,
   periodLabel,
   periodEmpty,
   alertsUnavailable,
@@ -1543,9 +1548,15 @@ function Dashboard({
           <option value={90}>Last 90 days</option>
           <option value="all">All dataset records</option>
         </select>
+        <label className="font-semibold text-ink" htmlFor="analysis-mode">Alert analysis</label>
+        <select id="analysis-mode" className="rounded border border-line bg-card px-2 py-1 text-ink" value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value)}>
+          <option value="historical">Historical dataset scan</option>
+          <option value="current">Latest 30-day window</option>
+        </select>
         <span>{periodLabel}</span>
       </div>
-      {periodEmpty ? <div className="mb-5 rounded-tool border border-animal/40 bg-card p-4 text-sm text-ink">No records fall in this reporting period. Choose another period or select “All dataset records”.</div> : null}
+
+      {periodEmpty ? <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-tool border border-animal/40 bg-card p-4 text-sm text-ink"><span>Use the complete historical period for this dataset to inspect older records.</span><Button variant="ghost" className="px-3 py-1.5" onClick={() => setPeriodDays('all')}>Use dataset period</Button></div> : null}
 
       <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] xl:gap-11">
         <MapPanel
@@ -1561,7 +1572,7 @@ function Dashboard({
         <section>
           <h2 className="font-display text-2xl font-bold">Early warnings</h2>
           <div className="mb-2 text-sm text-mute">The number is a risk score out of 100. It combines how far reports rose, weather and movement routes.</div>
-          {alerts.length ? alerts.slice(0, 4).map((alert) => <AlertItem key={alert.loc} alert={alert} compact />) : <div className="py-5 text-mute">{alertsUnavailable ? 'Alerts are not calculated from uploaded historical records.' : 'No unusual increases in this period.'}</div>}
+          {alerts.length ? alerts.slice(0, 4).map((alert) => <AlertItem key={`${alert.loc}-${alert.analysisDate || 'current'}`} alert={alert} compact />) : <div className="py-5 text-mute">{alertsUnavailable ? 'Alerts are not calculated from uploaded historical records.' : analysisMode === 'historical' ? 'No verified anomaly crossed the alert thresholds in the dataset history.' : 'No unusual increases in this period.'}</div>}
           <Button variant="ghost" className="mt-3" onClick={() => setPage('alerts')}>
             See all alerts
           </Button>
@@ -1953,14 +1964,14 @@ function DetectionChart({ reports, location }) {
   );
 }
 
-function AlertsPage({ reports, alerts, diagnostics, activeCity, setActiveCity, auth, onValidate, onRespond, envByCity }) {
+function AlertsPage({ reports, alerts, diagnostics, activeCity, setActiveCity, auth, onValidate, onRespond, envByCity, analysisMode, periodLabel }) {
   const cityOptions = getReportLocations(reports);
   const city = activeCity || alerts[0]?.loc || cityOptions[0] || LOCATIONS[0][0];
 
   return (
     <>
       <Top title="Early warnings">
-        A city is flagged when its weekly reports run at least 1.8x the usual level and cross the alert line. The anomaly engine combines z-score,
+        {analysisMode === 'historical' ? `Historical scan for ${periodLabel}. ` : 'Latest dataset window. '}A city is flagged when its weekly reports run at least 1.8x the usual level and cross the alert line. The anomaly engine combines z-score,
         cross-sector rise, unusual weather and movement routes. These are signals to investigate, not confirmed outbreaks.
       </Top>
 
@@ -1978,7 +1989,7 @@ function AlertsPage({ reports, alerts, diagnostics, activeCity, setActiveCity, a
           {alerts.length ? (
             alerts.map((alert) => <AlertItem key={alert.loc} alert={alert} auth={auth} onValidate={onValidate} onRespond={onRespond} envByCity={envByCity} />)
           ) : (
-            <div className="py-5 text-mute">No unusual increases this week.</div>
+            <div className="py-5 text-mute">{analysisMode === 'historical' ? 'No verified historical anomaly crossed the alert thresholds.' : 'No unusual increases in this period.'}</div>
           )}
         </div>
         <section>
@@ -2414,7 +2425,8 @@ function App() {
   const [uploadInfo, setUploadInfo] = useState(null);
   const [datasets, setDatasets] = useState([]);
   const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1' ? '' : window.localStorage.getItem('onehealth-dataset-id') || 'all');
-  const [periodDays, setPeriodDays] = useState(7);
+  const [periodDays, setPeriodDays] = useState('all');
+  const [analysisMode, setAnalysisMode] = useState('historical');
   const [periodEnd, setPeriodEnd] = useState(null);
   const [weatherByCity, setWeatherByCity] = useState(ENV);
   const [weatherSource, setWeatherSource] = useState('demo');
@@ -2428,15 +2440,24 @@ function App() {
   const datasetReports = reports;
   const analysisReports = useMemo(() => periodizeReports(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
   const periodLabel = useMemo(() => periodText(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
+  const periodStatus = useMemo(() => periodAvailability(datasetReports, periodEnd || latestReportDate(datasetReports) || new Date(), periodDays), [datasetReports, periodEnd, periodDays]);
   const uploadedDataset = datasetReports.some((row) => row.sourceType === 'csv' || row.sourceType === 'csv_browser');
   const rawAlerts = useMemo(() => uploadedDataset ? serverAlerts : computeAlerts(analysisReports, weatherByCity), [analysisReports, uploadedDataset, serverAlerts, weatherByCity]);
   const alerts = useMemo(
-    () =>
-      rawAlerts.map((alert) => {
+    () => {
+      const visibleAlerts = rawAlerts.filter((alert) => {
+        if (!alert.analysisDate || periodDays === 'all' || !periodEnd) return true;
+        const date = new Date(alert.analysisDate);
+        const end = new Date(periodEnd);
+        const start = new Date(end.getTime() - (Number(periodDays) - 1) * 864e5);
+        return date >= start && date <= end;
+      });
+      return visibleAlerts.map((alert) => {
         const manualValidation = manualValidations[alert.loc];
         return manualValidation ? { ...alert, manualValidation, validationStatus: manualValidation.status } : alert;
-      }),
-    [manualValidations, rawAlerts],
+      });
+    },
+    [manualValidations, periodDays, periodEnd, rawAlerts],
   );
 
   const showToast = (message) => {
@@ -2493,7 +2514,10 @@ function App() {
 
   const loadServerAlertContext = async (tokenAtStart, datasetId = activeDatasetId) => {
     try {
-      const query = datasetId ? `?datasetId=${encodeURIComponent(datasetId)}` : '';
+      const queryParams = new URLSearchParams();
+      if (datasetId) queryParams.set('datasetId', datasetId);
+      if (analysisMode === 'historical') queryParams.set('mode', 'historical');
+      const query = queryParams.toString() ? `?${queryParams.toString()}` : '';
       const response = await fetch(`/api/alerts${query}`, { headers: { Authorization: `Bearer ${auth?.token}` } });
       if (response.status === 401) {
         logout();
@@ -2711,6 +2735,7 @@ function App() {
               sourceDataset: row.sourceDataset,
               sourceUrl: row.sourceUrl,
               isSynthetic: row.isSynthetic,
+              alertLabel: row.alertLabel,
               vaccinationStatus: row.vaccinationStatus,
               confirmationStatus: row.confirmationStatus,
               farmId: row.farmId,
@@ -2907,6 +2932,10 @@ function App() {
   }, [auth, activeDatasetId]);
 
   useEffect(() => {
+    if (auth && activeDatasetId && live) loadServerAlertContext(csvUploadToken.current, activeDatasetId);
+  }, [analysisMode]);
+
+  useEffect(() => {
     window.scrollTo(0, 0);
   }, [page]);
 
@@ -2930,8 +2959,10 @@ function App() {
         onCsvUpload={handleCsvUpload}
         periodDays={periodDays}
         setPeriodDays={setPeriodDays}
+        analysisMode={analysisMode}
+        setAnalysisMode={setAnalysisMode}
         periodLabel={periodLabel}
-        periodEmpty={Boolean(uploadedDataset && datasetReports.length && !analysisReports.length)}
+        periodEmpty={Boolean(uploadedDataset && periodStatus.empty)}
         alertsUnavailable={false}
         datasets={datasets}
         activeDatasetId={activeDatasetId}
@@ -2960,6 +2991,8 @@ function App() {
         onValidate={validateAlert}
         onRespond={updateAlertResponse}
         envByCity={weatherByCity}
+        analysisMode={analysisMode}
+        periodLabel={periodLabel}
       />
     ),
     pipeline: <PipelinePage reports={analysisReports} alerts={alerts} live={live} empty={empty} uploadInfo={uploadInfo} envByCity={weatherByCity} weatherSource={weatherSource} />,

@@ -90,3 +90,12 @@ test('csv import accepts zero-case climate observations without turning measurem
   assert.equal(parsed.reports[0].temperatureCelsius, 18.5);
   assert.equal(parsed.reports[0].isSynthetic, true);
 });
+
+test('csv import preserves alert_label as metadata without using it as an alert decision', async () => {
+  const parsed = await parseReportCsvBuffer(Buffer.from([
+    'date,location,sector,disease,cases,alert_label',
+    '2025-12-31,Jaipur,human,Dengue,2,synthetic_warning',
+  ].join('\n')));
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.reports[0].alertLabel, 'synthetic_warning');
+});

@@ -33,4 +33,5 @@ module.exports = mongoose.model('Report', new mongoose.Schema({
   sourceDataset: { type: String, trim: true, maxlength: 120 },
   sourceUrl: { type: String, trim: true, maxlength: 500 },
   isSynthetic: { type: Boolean },
+  alertLabel: { type: String, trim: true, maxlength: 80 },
 }));

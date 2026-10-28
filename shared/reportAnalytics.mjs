@@ -17,6 +17,18 @@ export function filterReportsByPeriod(rows, end, days = 7) {
     .filter((row) => !Number.isFinite(row.day) || (row.day >= 0 && (days === 'all' || row.day < Number(days))));
 }
 
+export function periodAvailability(rows, end, days = 7) {
+  const dated = rows.map(recordDate).filter(Boolean).sort((a, b) => a - b);
+  const selected = filterReportsByPeriod(rows, end, days);
+  return {
+    empty: rows.length > 0 && selected.length === 0,
+    hasHistoricalData: dated.length > 0,
+    earliest: dated[0] || null,
+    latest: dated.at(-1) || null,
+    selectedRows: selected.length,
+  };
+}
+
 export function aggregateCasesBySector(rows) {
   return rows.reduce((totals, row) => {
     if (['human', 'animal', 'environment'].includes(row.sec ?? row.sector)) {
