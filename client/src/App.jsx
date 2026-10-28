@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import { ML_MODEL, cityStats, computeAlerts as computeSharedAlerts } from '../../shared/anomalyEngine.mjs';
 import { aggregateDiseaseCases, calculateDashboardMetrics, filterReportsByPeriod, periodAvailability, recordDate } from '../../shared/reportAnalytics.mjs';
+import { createRequestCoordinator, responseWasNotModified } from './sharedDataRequest.mjs';
 
 const SECTORS = {
   human: 'Human',
@@ -2434,6 +2435,8 @@ function App() {
   const [toast, setToast] = useState('');
   const [uploadInfo, setUploadInfo] = useState(null);
   const [datasets, setDatasets] = useState([]);
+  const [datasetListReady, setDatasetListReady] = useState(false);
+  const [datasetListOwner, setDatasetListOwner] = useState('');
   const [activeDatasetId, setActiveDatasetId] = useState(() => window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1' ? '' : window.localStorage.getItem('onehealth-dataset-id') || 'all');
   const [periodDays, setPeriodDays] = useState('all');
   const [analysisMode, setAnalysisMode] = useState('historical');
@@ -2447,6 +2450,8 @@ function App() {
   const [alertDiagnostics, setAlertDiagnostics] = useState([]);
   const [serverAlerts, setServerAlerts] = useState([]);
   const csvUploadToken = useRef(0);
+  const datasetsRequest = useRef(createRequestCoordinator());
+  const reportsRequest = useRef(createRequestCoordinator());
   const datasetReports = reports;
   const analysisReports = useMemo(() => periodizeReports(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
   const periodLabel = useMemo(() => periodText(datasetReports, periodEnd, periodDays), [datasetReports, periodEnd, periodDays]);
@@ -2516,7 +2521,11 @@ function App() {
 
   const logout = () => {
     const token = auth?.token;
+    datasetsRequest.current.invalidate();
+    reportsRequest.current.invalidate();
     setAuth(null);
+    setDatasetListReady(false);
+    setDatasetListOwner('');
     window.localStorage.removeItem(AUTH_STORAGE_KEY);
     if (page === 'admin') setPage('dashboard');
     if (token) fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
@@ -2684,10 +2693,20 @@ function App() {
     }
     setDataLoadError('');
     setDataLoading(true);
+    const request = datasetsRequest.current.begin();
     try {
-      const response = await fetch('/api/reports/datasets', { headers: { Authorization: `Bearer ${auth?.token}` } });
+      const response = await fetch('/api/reports/datasets', { cache: 'no-store', signal: request.signal, headers: { Authorization: `Bearer ${auth?.token}`, 'Cache-Control': 'no-cache' } });
+      if (responseWasNotModified(response)) {
+        if (request.isCurrent()) {
+          setDatasetListReady(true);
+          setDatasetListOwner(auth?.user?.username || '');
+          setDataLoading(false);
+        }
+        return activeDatasetId || 'all';
+      }
       if (!response.ok) throw new Error('dataset list failed');
       const nextDatasets = await response.json();
+      if (!request.isCurrent()) return activeDatasetId || 'all';
       setDatasets(nextDatasets);
       const savedId = preferredId || window.localStorage.getItem('onehealth-dataset-id') || '';
       const selectable = nextDatasets.filter((dataset) => dataset.status === 'ready' || dataset.status === 'legacy');
@@ -2697,38 +2716,48 @@ function App() {
       const nextId = selected?.datasetId || 'all';
       setActiveDatasetId(nextId);
       window.localStorage.setItem('onehealth-dataset-id', nextId);
+      setDatasetListReady(true);
+      setDatasetListOwner(auth?.user?.username || '');
       setDataLoading(false);
       return nextId;
     } catch (error) {
+      if (!request.isCurrent()) return activeDatasetId || 'all';
       setDatasets([]);
       setActiveDatasetId('all');
+      setDatasetListReady(false);
+      setDatasetListOwner('');
       setReports([]);
       setLive(false);
       setEmpty(false);
       setDataLoading(false);
       setDataLoadError(`Could not load shared datasets. ${error.message || 'Check the API connection and try again.'}`);
       return 'all';
+    } finally {
+      request.finish();
     }
   };
 
   const loadReports = async (first = false, datasetId = activeDatasetId) => {
     const tokenAtStart = csvUploadToken.current;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 4000);
+    const request = reportsRequest.current.begin();
 
     try {
       setDataLoading(true);
       setDataLoadError('');
       const query = new URLSearchParams({ limit: '50000' });
       if (datasetId) query.set('datasetId', datasetId);
-      const response = await fetch(`/api/reports?${query.toString()}`, { signal: controller.signal, headers: { Authorization: `Bearer ${auth?.token}` } });
+      const response = await fetch(`/api/reports?${query.toString()}`, { cache: 'no-store', signal: request.signal, headers: { Authorization: `Bearer ${auth?.token}`, 'Cache-Control': 'no-cache' } });
+      if (responseWasNotModified(response)) {
+        if (request.isCurrent()) setDataLoading(false);
+        return;
+      }
       if (response.status === 401) {
         logout();
         return;
       }
       if (!response.ok) throw new Error('bad status');
       const rows = await response.json();
-      if (tokenAtStart !== csvUploadToken.current) return;
+      if (!request.isCurrent() || tokenAtStart !== csvUploadToken.current) return;
       setLive(true);
       setEmpty(!rows.length);
 
@@ -2786,15 +2815,16 @@ function App() {
         setServerAlerts([]);
         setAlertDiagnostics([]);
       }
-      setDataLoading(false);
+      if (request.isCurrent()) setDataLoading(false);
     } catch (error) {
+      if (!request.isCurrent() || tokenAtStart !== csvUploadToken.current) return;
       setReports([]);
       setLive(false);
       setEmpty(false);
       setDataLoadError(`Could not load shared reports. ${error.message || 'Check the API connection and try again.'}`);
       setDataLoading(false);
     } finally {
-      window.clearTimeout(timeout);
+      request.finish();
     }
   };
 
@@ -2962,8 +2992,8 @@ function App() {
   }, [auth]);
 
   useEffect(() => {
-    if (auth && activeDatasetId) loadReports(false, activeDatasetId);
-  }, [auth, activeDatasetId]);
+    if (auth && datasetListReady && datasetListOwner === auth.user.username && activeDatasetId) loadReports(false, activeDatasetId);
+  }, [auth, activeDatasetId, datasetListReady, datasetListOwner]);
 
   useEffect(() => {
     if (auth && activeDatasetId && live) loadServerAlertContext(csvUploadToken.current, activeDatasetId);
