@@ -846,12 +846,16 @@ function Tag({ sector }) {
   );
 }
 
-function Header({ page, setPage, alertCount, live, empty, uploadInfo, auth, onLogin, onLogout }) {
+function Header({ page, setPage, alertCount, live, empty, uploadInfo, dataLoading, dataLoadError, auth, onLogin, onLogout }) {
   const [loginOpen, setLoginOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [busy, setBusy] = useState(false);
-  const liveText = uploadInfo
+  const liveText = dataLoading
+    ? 'Loading shared data'
+    : dataLoadError
+    ? 'Shared data unavailable'
+    : uploadInfo
     ? (uploadInfo.saved ? 'Database dataset' : 'Browser-only dataset')
     : live ? (empty ? 'Database empty' : 'Connected to database') : 'No dataset loaded';
   const items = [
@@ -1466,6 +1470,8 @@ function Dashboard({
   empty,
   auth,
   uploadInfo,
+  dataLoading,
+  dataLoadError,
   onCsvUpload,
   periodDays,
   setPeriodDays,
@@ -1504,6 +1510,8 @@ function Dashboard({
 
   return (
     <>
+      {dataLoading ? <div role="status" className="mb-5 rounded-tool border border-line bg-card p-4 text-sm text-mute">Loading all ready datasets from the shared backend…</div> : null}
+      {dataLoadError ? <div role="alert" className="mb-5 rounded-tool border border-alert/40 bg-card p-4 text-sm text-alert">Shared backend data could not be loaded. {dataLoadError} Refresh the page or check the Render API connection.</div> : null}
       <Top
         title={count ? `${count} ${count === 1 ? 'place needs' : 'places need'} a closer look this week` : 'No unusual rises this week'}
         action={
@@ -2416,6 +2424,8 @@ function App() {
   const [reports, setReports] = useState([]);
   const [live, setLive] = useState(false);
   const [empty, setEmpty] = useState(false);
+  const [dataLoadError, setDataLoadError] = useState('');
+  const [dataLoading, setDataLoading] = useState(false);
   const [filters, setFilters] = useState({ sec: 'all', loc: 'all' });
   const [layers, setLayers] = useState({ heat: true, corridors: true });
   const [mapFilters, setMapFilters] = useState({ sector: 'all', severity: 'all', minCases: 0, dateRange: '7', disease: 'all', location: 'all' });
@@ -2660,12 +2670,20 @@ function App() {
   };
 
   const loadDatasets = async (preferredId = '') => {
-    if (window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1') {
+    const browserOnlyMode = window.localStorage.getItem(BROWSER_MODE_STORAGE_KEY) === '1';
+    if (browserOnlyMode && can(auth, 'reports:write')) {
       setDatasets([]);
       setActiveDatasetId('');
       await restoreBrowserDataset();
+      setDataLoading(false);
       return '';
     }
+    if (browserOnlyMode && !can(auth, 'reports:write')) {
+      window.localStorage.removeItem(BROWSER_MODE_STORAGE_KEY);
+      clearBrowserDataset();
+    }
+    setDataLoadError('');
+    setDataLoading(true);
     try {
       const response = await fetch('/api/reports/datasets', { headers: { Authorization: `Bearer ${auth?.token}` } });
       if (!response.ok) throw new Error('dataset list failed');
@@ -2679,14 +2697,17 @@ function App() {
       const nextId = selected?.datasetId || 'all';
       setActiveDatasetId(nextId);
       window.localStorage.setItem('onehealth-dataset-id', nextId);
+      setDataLoading(false);
       return nextId;
-    } catch {
+    } catch (error) {
       setDatasets([]);
-      setActiveDatasetId('');
+      setActiveDatasetId('all');
       setReports([]);
       setLive(false);
-      setEmpty(true);
-      return '';
+      setEmpty(false);
+      setDataLoading(false);
+      setDataLoadError(`Could not load shared datasets. ${error.message || 'Check the API connection and try again.'}`);
+      return 'all';
     }
   };
 
@@ -2696,6 +2717,8 @@ function App() {
     const timeout = window.setTimeout(() => controller.abort(), 4000);
 
     try {
+      setDataLoading(true);
+      setDataLoadError('');
       const query = new URLSearchParams({ limit: '50000' });
       if (datasetId) query.set('datasetId', datasetId);
       const response = await fetch(`/api/reports?${query.toString()}`, { signal: controller.signal, headers: { Authorization: `Bearer ${auth?.token}` } });
@@ -2763,10 +2786,13 @@ function App() {
         setServerAlerts([]);
         setAlertDiagnostics([]);
       }
-    } catch {
+      setDataLoading(false);
+    } catch (error) {
       setReports([]);
       setLive(false);
-      setEmpty(true);
+      setEmpty(false);
+      setDataLoadError(`Could not load shared reports. ${error.message || 'Check the API connection and try again.'}`);
+      setDataLoading(false);
     } finally {
       window.clearTimeout(timeout);
     }
@@ -2782,6 +2808,12 @@ function App() {
     setManualValidations({});
     setServerAlerts([]);
     setAlertDiagnostics([]);
+  };
+
+  const refreshSharedData = async () => {
+    if (!auth || auth.user.role !== 'viewer') return;
+    const nextId = await loadDatasets();
+    if (nextId === 'all') await loadReports(false, 'all');
   };
 
   const handleCsvUpload = async (event) => {
@@ -2831,10 +2863,12 @@ function App() {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || 'CSV import failed');
 
-        await loadDatasets(payload.datasetId);
+        await loadDatasets();
         window.localStorage.removeItem(BROWSER_MODE_STORAGE_KEY);
         clearBrowserDataset();
-        if (payload.datasetId) await loadReports(false, payload.datasetId);
+        setActiveDatasetId('all');
+        window.localStorage.setItem('onehealth-dataset-id', 'all');
+        await loadReports(false, 'all');
         if (payload.dateRange?.max) setPeriodEnd(new Date(payload.dateRange.max));
         setPeriodDays('all');
         setUploadInfo({ name: file.name, rows: payload.inserted, skipped: payload.skipped, saved: true, datasetId: payload.datasetId });
@@ -2936,6 +2970,12 @@ function App() {
   }, [analysisMode]);
 
   useEffect(() => {
+    if (!auth || auth.user.role !== 'viewer') return undefined;
+    const refreshTimer = window.setInterval(() => { refreshSharedData(); }, 60 * 1000);
+    return () => window.clearInterval(refreshTimer);
+  }, [auth]);
+
+  useEffect(() => {
     window.scrollTo(0, 0);
   }, [page]);
 
@@ -2956,6 +2996,8 @@ function App() {
         empty={empty}
         auth={auth}
         uploadInfo={uploadInfo}
+        dataLoadError={dataLoadError}
+        dataLoading={dataLoading}
         onCsvUpload={handleCsvUpload}
         periodDays={periodDays}
         setPeriodDays={setPeriodDays}
@@ -3016,6 +3058,8 @@ function App() {
         live={live}
         empty={empty}
         uploadInfo={uploadInfo}
+        dataLoadError={dataLoadError}
+        dataLoading={dataLoading}
         auth={auth}
         onLogin={login}
         onLogout={logout}

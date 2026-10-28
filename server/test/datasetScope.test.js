@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { ALL_DATASETS, filterSharedReports, sharedReportFilter } = require('../datasetScope');
+const { ALL_DATASETS, filterSharedReports, sharedReportFilter, dedupeSharedReports } = require('../datasetScope');
 
 test('shared scope combines every ready dataset and legacy CSV rows across sectors', () => {
   const rows = [
@@ -24,4 +24,15 @@ test('shared Mongo filter scopes reports to ready IDs and legacy imports without
     { datasetId: { $exists: false }, sourceType: 'csv' },
     { datasetId: { $exists: false }, sourceType: { $ne: 'csv' } },
   ]);
+});
+
+test('shared scope deduplicates repeated records while retaining the first provenance row', () => {
+  const rows = [
+    { recordFingerprint: 'same', datasetId: 'admin-a', sourceName: 'a.csv' },
+    { recordFingerprint: 'same', datasetId: 'admin-b', sourceName: 'b.csv' },
+    { recordFingerprint: 'different', datasetId: 'admin-b', sourceName: 'b.csv' },
+  ];
+  const result = dedupeSharedReports(rows);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].sourceName, 'a.csv');
 });

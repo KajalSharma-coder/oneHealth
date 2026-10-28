@@ -7,7 +7,7 @@ const { datasetIdForBuffer, legacyDatasetId } = require('../datasetIdentity');
 const { requirePermission, writeAudit } = require('../auth');
 const { parseReportCsvBuffer } = require('../csvImport');
 const { withReportQuality } = require('../reportQuality');
-const { ALL_DATASETS, isAllDatasets, sharedReportFilter } = require('../datasetScope');
+const { ALL_DATASETS, isAllDatasets, sharedReportFilter, dedupeSharedReports } = require('../datasetScope');
 
 const SECTORS = new Set(['human', 'animal', 'environment']);
 const MAX_CSV_FILE_SIZE = 100 * 1024 * 1024;
@@ -131,7 +131,8 @@ router.get('/', requirePermission('reports:read'), async (req, res) => {
     const limit = cleanLimit(req.query.limit);
     if (!limit) return res.status(400).json({ error: 'limit must be a number from 1 to 50000' });
 
-    res.json(await Report.find(filter).sort({ date: -1 }).limit(limit));
+    const rows = await Report.find(filter).sort({ date: -1 }).limit(limit);
+    res.json(isAllDatasets(datasetId) ? dedupeSharedReports(rows) : rows);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -146,7 +147,8 @@ router.get('/export.csv', requirePermission('reports:read'), async (req, res) =>
       : datasetFilter(datasetId);
     if (req.query.sector) filter.sector = cleanText(req.query.sector);
     if (req.query.location) filter.location = cleanText(req.query.location);
-    const rows = await Report.find(filter).sort({ date: -1 }).limit(50000).lean();
+    const loadedRows = await Report.find(filter).sort({ date: -1 }).limit(50000).lean();
+    const rows = isAllDatasets(datasetId) ? dedupeSharedReports(loadedRows) : loadedRows;
     const headers = ['date', 'location', 'state', 'district', 'sector', 'disease', 'cases', 'latitude', 'longitude', 'temperatureCelsius', 'precipitationMm', 'datasetId', 'sourceType', 'sourceName', 'sourceUploadedBy', 'sourceUploadedAt', 'isSynthetic', 'dataQualityScore'];
     const body = rows.map((row) => headers.map((header) => csvEscape(row[header] instanceof Date ? row[header].toISOString() : row[header])).join(','));
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -167,7 +169,8 @@ router.get('/export.pdf', requirePermission('reports:read'), async (req, res) =>
       : datasetFilter(datasetId);
     if (req.query.sector) filter.sector = cleanText(req.query.sector);
     if (req.query.location) filter.location = cleanText(req.query.location);
-    const rows = await Report.find(filter).sort({ date: -1 }).limit(50000).lean();
+    const loadedRows = await Report.find(filter).sort({ date: -1 }).limit(50000).lean();
+    const rows = isAllDatasets(datasetId) ? dedupeSharedReports(loadedRows) : loadedRows;
     const lines = ['OneHealth report export', `Generated: ${new Date().toISOString()}`, `Rows: ${rows.length}`, ''];
     rows.slice(0, 120).forEach((row) => lines.push(`${row.date ? new Date(row.date).toISOString().slice(0, 10) : '-'} | ${row.location || '-'} | ${row.sector || '-'} | ${row.disease || '-'} | cases ${row.cases ?? 0} | dataset ${row.datasetId || 'legacy'} | source ${row.sourceName || '-'}`));
     const escapePdf = (value) => String(value).replace(/([\\()])/g, '\\$1').replace(/[^\x20-\x7e]/g, ' ');

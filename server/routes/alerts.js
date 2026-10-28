@@ -5,7 +5,7 @@ const detect = require('../detect');
 const { requirePermission, writeAudit } = require('../auth');
 const { selectAnalysisWindow } = require('../alertWindow');
 const Dataset = require('../models/Dataset');
-const { ALL_DATASETS, isAllDatasets, sharedReportFilter } = require('../datasetScope');
+const { ALL_DATASETS, isAllDatasets, sharedReportFilter, dedupeSharedReports } = require('../datasetScope');
 
 const DAY = 24 * 60 * 60 * 1000;
 const datasetFilter = (datasetId) => datasetId?.startsWith('legacy:')
@@ -16,7 +16,8 @@ const analysisWindow = async (datasetId, mode = 'current') => {
   const filter = isAllDatasets(scope)
     ? sharedReportFilter(await Dataset.find({ status: 'ready' }).distinct('datasetId'))
     : datasetFilter(scope);
-  const rows = await Report.find(filter).lean();
+  const loadedRows = await Report.find(filter).lean();
+  const rows = isAllDatasets(scope) ? dedupeSharedReports(loadedRows) : loadedRows;
   if (mode === 'historical') {
     const referenceDate = rows.reduce((max, row) => {
       const date = new Date(row.date);

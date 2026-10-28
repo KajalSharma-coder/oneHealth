@@ -20,4 +20,19 @@ function filterSharedReports(rows, readyDatasetIds) {
       || (!row.datasetId && row.sourceType !== 'csv'));
 }
 
-module.exports = { ALL_DATASETS, isAllDatasets, sharedReportFilter, filterSharedReports };
+function sharedRecordKey(row) {
+  if (row.recordFingerprint) return `fingerprint:${row.recordFingerprint}`;
+  return [row.date || '', row.location || '', row.sector || '', row.disease || '', row.cases ?? '', row.latitude ?? '', row.longitude ?? '', row.temperatureCelsius ?? '', row.precipitationMm ?? ''].join('|');
+}
+
+function dedupeSharedReports(rows) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = sharedRecordKey(row);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+module.exports = { ALL_DATASETS, isAllDatasets, sharedReportFilter, filterSharedReports, dedupeSharedReports };
